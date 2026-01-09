@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+Brad - Autonomous AI Software Engineer
+Main entry point for the Brad orchestrator.
+"""
+
+import sys
+import argparse
+from dotenv import load_dotenv
+from config import load_config, validate_config
+from logging_config import setup_logging, get_logger
+from brad_orchestrator import BradOrchestrator
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Brad - Autonomous AI Software Engineer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python brad.py run --once          # Process issues once
+  python brad.py run --loop          # Process continuously (not yet implemented)
+  python brad.py --log-level DEBUG   # Enable debug logging
+        """
+    )
+    
+    parser.add_argument(
+        "command",
+        choices=["run"],
+        help="Command to execute"
+    )
+    
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run once and exit"
+    )
+    
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Run continuously (not yet implemented)"
+    )
+    
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Override log level from config"
+    )
+    
+    args = parser.parse_args()
+    
+    # Load .env file
+    load_dotenv()
+    
+    # Load configuration
+    try:
+        cfg = load_config()
+        
+        # Override log level if specified
+        if args.log_level:
+            cfg.log_level = args.log_level
+        
+        # Setup logging
+        log_file = setup_logging(log_level=cfg.log_level)
+        logger = get_logger(__name__)
+        
+        logger.info("Brad starting up")
+        logger.info(f"Log file: {log_file}")
+        logger.info(f"Target repository: {cfg.target_repo_path}")
+        logger.info(f"JIRA URL: {cfg.jira_url}")
+        logger.info(f"GitHub repo: {cfg.github_repo}")
+        
+        # Validate configuration
+        validate_config(cfg)
+        logger.info("Configuration validated")
+        
+    except Exception as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Initialize orchestrator
+    try:
+        brad = BradOrchestrator(cfg)
+    except Exception as e:
+        logger = get_logger(__name__)
+        logger.error(f"Failed to initialize Brad: {e}", exc_info=True)
+        sys.exit(1)
+    
+    # Execute command
+    try:
+        if args.command == "run":
+            if args.loop:
+                logger.error("Loop mode not yet implemented")
+                sys.exit(1)
+            else:
+                brad.run_once()
+        
+        logger.info("Brad completed successfully")
+        
+    except KeyboardInterrupt:
+        logger.info("Brad interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Brad failed with error: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
