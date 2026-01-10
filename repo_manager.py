@@ -106,9 +106,43 @@ class RepoManager:
     # Commit & push
     # -------------------------
 
+    def _cleanup_llm_utility_files(self):
+        """Remove LLM-generated utility files that shouldn't be in the commit."""
+        import os
+        import glob
+        
+        # Patterns for LLM-generated utility/progress/status files
+        patterns = [
+            "*.md",
+        ]
+        
+        removed_files = []
+        for pattern in patterns:
+            # Find files matching the pattern in the repo
+            matches = glob.glob(os.path.join(self.repo_path, "**", pattern), recursive=True)
+            for file_path in matches:
+                if os.path.exists(file_path):
+                    try:
+                        # Unstage if staged
+                        self._run_git("reset", "HEAD", file_path, check=False)
+                        # Remove from working directory
+                        os.remove(file_path)
+                        removed_files.append(os.path.basename(file_path))
+                        self.logger.info(f"Removed LLM utility file: {os.path.basename(file_path)}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to remove {file_path}: {e}")
+        
+        if removed_files:
+            self.logger.info(f"Cleaned up {len(removed_files)} LLM utility files: {', '.join(removed_files)}")
+        
+        return removed_files
+    
     def commit_all(self, message: str):
         """Stage and commit all changes to tracked files only."""
         self.logger.info(f"Committing changes: {message[:50]}...")
+        
+        # Clean up any LLM-generated utility files first
+        self._cleanup_llm_utility_files()
         
         # Only add modified tracked files, not untracked files
         # Use -u flag to update tracked files only

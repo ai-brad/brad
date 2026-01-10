@@ -130,10 +130,18 @@ CRITICAL INSTRUCTIONS:
    - "ACCEPTANCE CRITERIA:" followed by the scenarios
    - "READY TO IMPLEMENT" followed by the summary
    
+   **CRITICAL OUTPUT RULES:**
+   - Use JIRA markup ONLY: h2., h3., *bold*, not markdown ##, **bold**
+   - NO technical sections like "Current Implementation Issues" or "Implementation Notes"
+   - NO code references, file names, line numbers, or technical details
+   - Keep ALL output PM-friendly and business-focused
+   
    **DO NOT** include:
    - "I'll analyze the codebase..."
    - "Let me search for..."
    - "Based on my analysis..."
+   - Technical sections like "Current Implementation Issues"
+   - Any technical analysis or code references
    - Any narration of what you're doing or thinking
    
    **JUST START** with the output format directly.
@@ -142,17 +150,26 @@ CRITICAL INSTRUCTIONS:
       - Start with PM instructions explaining what to do
       - Then list questions that need clarification
       
-      Format EXACTLY like this:
+      Format using clear plain text structure:
       ```
       Hi! I've analyzed the codebase and have some questions about the requirements that need clarification before I can implement this feature.
       
-      **Please update the JIRA description with answers to these questions:**
+      → Please update the JIRA description with answers to these questions:
       
-      CLARIFYING QUESTIONS:
+      ═══════════════════════════════════════════════════════
+      CLARIFYING QUESTIONS
+      ═══════════════════════════════════════════════════════
       
       1. [Question about business logic]
+      
       2. [Question about edge case]
       ```
+      
+      Formatting rules:
+      - Use ═══ lines and clear section headers for visual separation
+      - Use numbered lists (1. 2. 3.) with blank lines between questions
+      - Use → for emphasis instead of bold
+      - Keep it clean and readable as plain text
       
       ✅ DO:
       - Write for a semi-technical Product Manager (NOT developers)
@@ -172,27 +189,71 @@ CRITICAL INSTRUCTIONS:
       - Focus on user actions and system responses, NOT implementation
       - Cover all major scenarios and edge cases you discovered in the code
       
-      Format EXACTLY like this:
+      CRITICAL INSTRUCTIONS FOR ACCEPTANCE CRITERIA:
+      - FIRST: Carefully read the JIRA description and identify ALL existing acceptance criteria
+      - COMPARE: For each scenario you want to propose, check if it's ALREADY covered in the description
+      - DO NOT output scenarios that are already in the description, even if worded slightly differently
+      - ONLY output genuinely NEW edge cases or scenarios that are MISSING from the description
+      - If the description already covers all major scenarios: respond with "READY TO IMPLEMENT" instead
+      - Better to output NOTHING than to repeat what's already documented
+      
+      Format using clear plain text structure:
       ```
-      Hi! I've analyzed the codebase and understand the feature requirements. Below are the acceptance criteria I'll use to implement this feature.
+      Hi! I've analyzed the codebase and found some additional edge cases that aren't covered in the current acceptance criteria.
       
-      **Please review and validate these scenarios.** If they match your requirements, I'll proceed with implementation. If anything needs adjustment, please update the JIRA description and I'll revise my approach.
+      → Please review these NEW scenarios and add them to the JIRA description if they're accurate. Once updated, I'll proceed with implementation.
       
-      ACCEPTANCE CRITERIA:
+      ═══════════════════════════════════════════════════════
+      ADDITIONAL EDGE CASES TO CONSIDER
+      ═══════════════════════════════════════════════════════
       
-      GIVEN a guest booked through Booking.com
-      WHEN the guest emails us directly to request a date change
-      THEN we should process the change ourselves without redirecting to Booking.com
-      
-      GIVEN we receive a notification from Booking.com about a guest change
-      WHEN the change was initiated through Booking.com's platform
-      THEN we should NOT treat it as a direct guest request
+      GIVEN [NEW scenario not in description]
+      WHEN [NEW condition not in description]
+      THEN [NEW expected behavior not in description]
       ```
+      
+      Remember: DO NOT output scenarios already in the description!
+      
+      Formatting rules:
+      - Use ═══ lines and clear section headers
+      - Use GIVEN/WHEN/THEN in capitals for clarity
+      - Use → for emphasis
+      - Keep readable as plain text
 
-   c) **"READY TO IMPLEMENT"** - Only if everything is crystal clear
-      - Summarize understanding at BUSINESS level only
-      - NO technical details whatsoever
-      - Example: "I understand we need to differentiate between guests who contact us directly versus changes that come through the booking platform, and only redirect the direct contacts."
+   c) **"READY TO IMPLEMENT"** - If requirements are clear and no new scenarios needed
+      - Use this if the description already has comprehensive acceptance criteria
+      - Summarize understanding at BUSINESS level ONLY
+      - NO technical details, NO code references, NO file names, NO implementation notes
+      - DO NOT include "Current Implementation Issues" or similar technical sections
+      - Keep it brief and PM-focused
+      
+      Format using clear plain text structure:
+      ```
+      Hi! I've analyzed the codebase and the requirements are clear. I understand:
+      
+      • [Key business point about the feature]
+      • [Key business point about edge cases]
+      
+      → I'm ready to implement this feature. I'll create a feature branch and start coding.
+      ```
+      
+      Example GOOD "READY TO IMPLEMENT":
+      ```
+      Hi! I've analyzed the codebase and the requirements are clear. I understand:
+      
+      • For OTA reservations, redirect guests to the OTA only for cancellations, date changes, and room changes
+      • Handle other requests (services, preferences) directly for OTA reservations  
+      • Process OTA notifications without redirecting
+      
+      → I'm ready to implement. I'll create a feature branch and start coding.
+      ```
+      
+      Example BAD (DO NOT DO THIS):
+      ```
+      ## Current Implementation Issues
+      
+      1. Overly Broad Redirect Logic: The code in cancel_reservation_tool_abstract.py:97-98...
+      ```
 
 AUDIENCE: Product Manager who understands the domain but NOT the code. Zero code references allowed.
 """
@@ -221,25 +282,41 @@ Requirements:
 {description}
 {attachments_text}
 
-Tasks:
+MANDATORY IMPLEMENTATION STEPS (in order):
 1. Implement the feature according to requirements
 2. Write tests (unit tests mandatory, integration tests if needed)
-3. Ensure all tests pass locally
-4. Commit with message: "{issue_key}: <concise description>"
+3. **RUN ALL TESTS LOCALLY** - This step is CRITICAL:
+   - Backend tests: Run `pytest -n10` and ensure ALL tests pass
+   - Frontend tests (if frontend changes): Run `npm run prepare-commit` and ensure it passes
+   - DO NOT proceed if ANY test fails - fix the failures first
+4. Only after ALL tests pass: Commit with message: "{issue_key}: <concise description>"
 5. Push the branch to origin
 6. Create a pull request against main branch with title "{issue_key}: <description>"
 
+CRITICAL TEST REQUIREMENTS:
+- You MUST run `pytest -n10` in the backend directory before claiming success
+- If you made frontend changes, you MUST run `npm run prepare-commit` 
+- DO NOT create a PR if tests fail locally
+- DO NOT claim implementation is complete if tests fail
+- If tests fail, analyze the failures, fix them, and re-run tests
+
 Important:
 - Follow existing code style exactly
-- Ensure all tests pass before pushing
+- DO NOT create utility files like *_ACCEPTANCE_CRITERIA.md, *_PROGRESS.md, etc.
 - You have full access to git operations and GitHub CLI/API
 
-After completing the work, respond with a status update formatted for JIRA:
+After completing the work AND TESTS PASS, respond with a status update formatted for JIRA:
 
-If SUCCESSFUL:
-- Mention "Created PR #<number>" or include the PR URL in your response
-- List the key changes and assumptions made during implementation
+If SUCCESSFUL (tests pass):
+- Mention "Created PR #<number>" or include the PR URL
+- State "All tests passed locally (pytest -n10 [and npm run prepare-commit if frontend])"
+- List the key changes made
 - Keep it concise and professional
+
+If TESTS FAIL:
+- State "Tests failed - implementation incomplete"
+- List which tests failed and why
+- Explain what needs to be fixed
 
 If STUCK or BLOCKED:
 - Clearly state what blocked you and why
@@ -272,30 +349,38 @@ Failed CI Jobs:
 CI Logs:
 {ci_logs}
 
-Tasks:
-1. Analyze the CI failure logs
+MANDATORY STEPS:
+1. Analyze the CI failure logs to understand what's failing
 2. Identify and fix the root cause
-3. Run tests locally to verify
-4. Commit with message: "{issue_key}: Fix CI - <what was fixed>"
+3. Run tests locally to verify your fix (pytest -n10 for backend, npm run prepare-commit for frontend)
+4. Only after tests pass locally: Commit with message "{issue_key}: Fix CI - <what was fixed>"
 5. Push changes (will re-trigger CI automatically)
+
+CRITICAL REQUIREMENTS:
+- You MUST run tests locally before pushing (pytest -n10 and/or npm run prepare-commit)
+- DO NOT push if tests still fail locally
+- Fix the actual issue, don't mask it or skip tests
+- DO NOT create utility files like *_NOTES.md, *_PROGRESS.md, etc.
 
 Important:
 - You're already on the correct branch
 - The PR exists - just push your fixes
-- Fix the actual issue, don't mask it
+- You have full access to the codebase and can make any necessary changes
 
-After fixing, respond with a status update formatted for JIRA:
+After fixing, respond with a status update using plain text formatting (NO markdown):
 
-If FIXED:
-- Use words like "fixed", "resolved", or "corrected"
-- Explain what was wrong and what you changed
-- Be concise and clear
+If FIXED (tests pass):
+- State what was wrong and what you changed
+- Mention "Tests now pass locally (pytest -n10 [and/or npm run prepare-commit])"
+- Keep it clear and concise
+- Use plain text (→ for emphasis, NOT markdown bold/italic)
 
 If STUCK:
 - Explain what you tried and why it didn't work
-- State clearly that you're stuck
+- State clearly what's blocking you
+- Suggest what's needed to unblock
 
-Your response will be posted directly as a JIRA comment.
+Your response will be posted as a JIRA comment. Use plain text formatting only.
 """
 
 
@@ -457,10 +542,29 @@ class OpenCodeInterface(AIAgentInterface):
                 return {"action": "propose_scenarios", "message": output, "details": ""}
         
         elif phase == "implementation":
-            # Look for PR creation
+            # Look for test failures first (highest priority)
+            if any(keyword in output_lower for keyword in [
+                'tests failed', 'test failed', 'pytest failed', 'test failure',
+                'tests did not pass', 'tests are failing', 'failing tests',
+                'implementation incomplete'
+            ]):
+                self.logger.info("Detected test failures - implementation incomplete")
+                return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
+            
+            # Look for PR creation (only valid if tests passed)
             if pr_match or pr_url_match or 'created pr' in output_lower or 'pull request' in output_lower:
                 pr_number = int(pr_match.group(1)) if pr_match else None
                 pr_url = pr_url_match.group(1) if pr_url_match else None
+                
+                # Check if output mentions tests passing
+                tests_passed = any(phrase in output_lower for phrase in [
+                    'tests passed', 'all tests pass', 'tests pass', 
+                    'pytest -n10', 'npm run prepare-commit'
+                ])
+                
+                if not tests_passed:
+                    self.logger.warning(f"PR created but no mention of passing tests")
+                
                 self.logger.info(f"Detected PR creation: #{pr_number} at {pr_url}")
                 return {
                     "action": "success",
@@ -516,18 +620,29 @@ class OpenCodeInterface(AIAgentInterface):
             
             self.logger.debug(f"Wrote prompt to: {prompt_file}")
             
-            # Build PowerShell command that reads prompt from file and passes to opencode
-            # Use PowerShell to properly handle multi-line strings
-            ps_cmd = f'Get-Content "{prompt_file}" -Raw | & "{self.opencode_cli_path}" run "{repo_path}" --model opencode/minimax-m2.1-free'
+            # Convert Windows paths to forward slashes for cross-platform compatibility
+            repo_path_unix = repo_path.replace('\\', '/')
+            prompt_file_unix = prompt_file.replace('\\', '/')
+            
+            # Build OpenCode command with attachments, then pipe prompt via stdin
+            opencode_cmd_parts = [
+                f'"{self.opencode_cli_path}"',
+                'run',
+                f'"{repo_path_unix}"',
+                '--model', 'opencode/minimax-m2.1-free'
+            ]
             
             # Add attachments
             if attachment_paths:
                 for attachment_path in attachment_paths:
-                    ps_cmd += f' -f "{attachment_path}"'
+                    attachment_path_unix = attachment_path.replace('\\', '/')
+                    opencode_cmd_parts.extend(['-f', f'"{attachment_path_unix}"'])
                     self.logger.debug(f"Adding attachment: {attachment_path}")
             
-            # Add the prompt argument (reading from temp file content)
-            ps_cmd += f' (Get-Content "{prompt_file}" -Raw)'
+            # Build PowerShell command that pipes prompt to opencode
+            # Read prompt from file and pipe to opencode with all arguments
+            opencode_cmd = ' '.join(opencode_cmd_parts)
+            ps_cmd = f'Get-Content "{prompt_file_unix}" -Raw | & {opencode_cmd}'
             
             self.logger.debug(f"Running PowerShell command")
             
@@ -535,6 +650,8 @@ class OpenCodeInterface(AIAgentInterface):
                 ["powershell", "-NoProfile", "-Command", ps_cmd],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',  # Replace invalid characters instead of failing
                 timeout=self.timeout,
                 cwd=repo_path,
             )
@@ -546,6 +663,14 @@ class OpenCodeInterface(AIAgentInterface):
                     "action": "error",
                     "message": f"OpenCode CLI failed: {result.stderr[:500]}",
                     "details": result.stderr
+                }
+            
+            if result.stdout is None:
+                self.logger.error("OpenCode output is None - likely encoding issue")
+                return {
+                    "action": "error",
+                    "message": "OpenCode CLI produced no output (encoding issue)",
+                    "details": f"stderr: {result.stderr if result.stderr else 'No stderr'}"
                 }
             
             output = result.stdout.strip()
