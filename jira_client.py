@@ -228,7 +228,7 @@ class JiraClient:
                         f.write(chunk)
                 
                 self.logger.info(f"Downloaded {filename} to {local_path}")
-                downloaded_paths.append(str(local_path))
+                downloaded_paths.append(str(local_path.absolute()))
                 
             except Exception as e:
                 self.logger.error(f"Failed to download {filename}: {e}")
