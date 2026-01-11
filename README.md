@@ -66,14 +66,50 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 5. Install Claude CLI
+### 5. Install AI CLI (Claude CLI or OpenCode)
 
+**Choose ONE of the following:**
+
+#### Option A: Claude CLI
 Follow instructions at: https://code.claude.com/docs/en/cli-reference
 
 Verify installation:
 ```bash
 claude --version
 ```
+
+#### Option B: OpenCode
+Follow instructions at: https://github.com/stackblitz/opencode
+
+Verify installation:
+```bash
+opencode --version
+```
+
+### 6. **REQUIRED:** Clone and Set Up the Target Repository (flaerobotics/bea)
+
+**This step is mandatory.** Brad works on a target repository that must be cloned and properly configured:
+
+1. Clone the flaerobotics/bea repository:
+```bash
+git clone https://github.com/flaerobotics/bea.git /path/to/your/bea
+cd /path/to/your/bea
+```
+
+2. Set up the repository environment:
+```bash
+# Create and activate virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies using uv
+uv sync
+```
+
+3. **Configure your AI CLI to work in this repository:**
+   - Ensure Claude CLI or OpenCode is configured to operate within the cloned repository path
+   - The AI agent will execute commands and make changes in this directory
+   - This path will be specified as `TARGET_REPO_PATH` in your `.env` configuration (see Configuration section below)
 
 ## Configuration
 
@@ -89,10 +125,10 @@ JIRA_TOKEN=your-jira-api-token
 
 # GitHub Configuration
 GITHUB_TOKEN=your-github-token
-GITHUB_REPO=owner/repo-name
+GITHUB_REPO=flaerobotics/bea  # Must be the flaerobotics/bea repository (set up in step 6)
 
-# Target Repository (the repo Brad will work on - must be absolute path)
-TARGET_REPO_PATH=/path/to/your/repo
+# Target Repository (must be the absolute path to the cloned flaerobotics/bea repo from step 6)
+TARGET_REPO_PATH=/path/to/your/bea  # e.g., /home/user/projects/bea or C:/git/bea
 
 # AI Agent Configuration
 # Options: "claude" or "opencode"
