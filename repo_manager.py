@@ -55,7 +55,7 @@ class RepoManager:
         self._run_git("fetch", "origin")
         
         self.logger.info(f"Checking out {base_branch}")
-        self._run_git("checkout", base_branch)
+        self._run_git("checkout", "-f", base_branch)
         
         self.logger.info(f"Resetting to origin/{base_branch}")
         self._run_git("reset", "--hard", f"origin/{base_branch}")
@@ -87,7 +87,7 @@ class RepoManager:
         branch_exists = branch_name in existing_branches
         
         if branch_exists:
-            self._run_git("checkout", branch_name)
+            self._run_git("checkout", "-f", branch_name)
             self.logger.info(f"Checked out existing branch '{branch_name}'")
         elif create_if_missing:
             self._run_git("checkout", "-b", branch_name)
@@ -185,3 +185,19 @@ class RepoManager:
         branch = result.stdout.strip()
         self.logger.debug(f"Current branch: {branch}")
         return branch
+    
+    def reset_to_clean_state(self, branch: str = "main"):
+        """Reset repository to clean state on specified branch."""
+        self.logger.info(f"Resetting to clean state on {branch}")
+        
+        # Abort any ongoing operations
+        self._run_git("merge", "--abort", check=False)
+        self._run_git("rebase", "--abort", check=False)
+        self._run_git("cherry-pick", "--abort", check=False)
+        
+        # Checkout and reset to remote (do NOT clean untracked files)
+        self._run_git("fetch", "origin")
+        self._run_git("checkout", "-f", branch)
+        self._run_git("reset", "--hard", f"origin/{branch}")
+        
+        self.logger.info(f"Repository reset to clean state on {branch}")

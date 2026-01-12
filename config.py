@@ -17,9 +17,11 @@ class Config:
     ai_agent: str  # "claude" or "opencode"
     claude_cli_path: str
     opencode_cli_path: str
+    opencode_model: str  # Model to use with OpenCode
     
     max_clarification_cycles: int
     max_ci_fix_iterations: int
+    max_review_fix_iterations: int
     max_flaky_retries: int
     ci_poll_interval: int
     
@@ -41,9 +43,11 @@ def load_config() -> Config:
         ai_agent=os.environ.get("AI_AGENT", "claude"),
         claude_cli_path=os.environ.get("CLAUDE_CLI_PATH", "claude"),
         opencode_cli_path=os.environ.get("OPENCODE_CLI_PATH", "opencode"),
+        opencode_model=os.environ.get("OPENCODE_MODEL", "claude-sonnet-4.5-20250514"),
         
         max_clarification_cycles=int(os.environ.get("MAX_CLARIFICATION_CYCLES", "3")),
         max_ci_fix_iterations=int(os.environ.get("MAX_CI_FIX_ITERATIONS", "5")),
+        max_review_fix_iterations=int(os.environ.get("MAX_REVIEW_FIX_ITERATIONS", "3")),
         max_flaky_retries=int(os.environ.get("MAX_FLAKY_RETRIES", "1")),
         ci_poll_interval=int(os.environ.get("CI_POLL_INTERVAL", "60")),
         

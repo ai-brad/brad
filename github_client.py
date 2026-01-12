@@ -22,6 +22,9 @@ class GitHubClient:
         self.logger.info(f"Opening PR: {branch} -> {base}")
         self.logger.debug(f"PR title: {title}")
         
+        if not title.startswith("Brad: "):
+            title = f"Brad: {title}"
+        
         payload = {
             "title": title,
             "head": branch,
@@ -106,3 +109,84 @@ class GitHubClient:
         except Exception as e:
             self.logger.error(f"Failed to check for existing PR: {e}")
             return None
+    
+    def get_brad_prs(self) -> List[Dict]:
+        """Get all open PRs created by Brad (prefix 'Brad: ')."""
+        self.logger.debug("Fetching Brad's PRs")
+        try:
+            resp = requests.get(
+                f"{self.base_url}/pulls",
+                headers=self.headers,
+                params={"state": "open"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            all_prs = resp.json()
+            brad_prs = [pr for pr in all_prs if pr['title'].startswith('Brad: ')]
+            self.logger.info(f"Found {len(brad_prs)} Brad PRs")
+            return brad_prs
+        except Exception as e:
+            self.logger.error(f"Failed to fetch Brad PRs: {e}")
+            return []
+    
+    def get_review_comments_needing_response(self, pr_number: int) -> List[Dict]:
+        """Get review comments that don't have a Brad response yet."""
+        self.logger.debug(f"Checking PR #{pr_number} for unresponded review comments")
+        try:
+            comments = self.fetch_review_comments(pr_number)
+            needs_response = []
+            
+            for comment in comments:
+                comment_id = comment['id']
+                replies = self.get_comment_replies(pr_number, comment_id)
+                has_brad_response = any(
+                    reply.get('body', '').startswith('Brad checking') 
+                    for reply in replies
+                )
+                
+                if not has_brad_response and not comment.get('body', '').startswith('Brad checking'):
+                    needs_response.append(comment)
+            
+            self.logger.info(f"PR #{pr_number}: {len(needs_response)} comments need response")
+            return needs_response
+        except Exception as e:
+            self.logger.error(f"Failed to get review comments: {e}")
+            return []
+    
+    def get_comment_replies(self, pr_number: int, comment_id: int) -> List[Dict]:
+        """Get replies to a specific review comment."""
+        try:
+            resp = requests.get(
+                f"{self.base_url}/pulls/{pr_number}/comments",
+                headers=self.headers,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            all_comments = resp.json()
+            return [
+                c for c in all_comments 
+                if c.get('in_reply_to_id') == comment_id
+            ]
+        except Exception as e:
+            self.logger.error(f"Failed to get comment replies: {e}")
+            return []
+    
+    def reply_to_review_comment(self, pr_number: int, comment_id: int, body: str) -> Dict:
+        """Reply to a review comment."""
+        self.logger.info(f"Replying to comment {comment_id} on PR #{pr_number}")
+        try:
+            payload = {
+                "body": body,
+                "in_reply_to": comment_id,
+            }
+            resp = requests.post(
+                f"{self.base_url}/pulls/{pr_number}/comments",
+                headers=self.headers,
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            self.logger.error(f"Failed to reply to comment: {e}")
+            raise

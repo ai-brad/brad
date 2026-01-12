@@ -259,44 +259,43 @@ minute) until completion.
 
 ### 7.3 CI/CD Result Analysis
 
-When the pipeline finishes, Brad fetches:
+**When the CI/CD pipeline finishes, Brad MUST check BOTH:**
 
-- CI/CD logs and results
+1. **CI/CD logs and results** - Check if all jobs passed
+2. **Pull request review comments** - Fetch and analyze any code review feedback
 
-- Pull request review comments (if any)
+**CRITICAL:** Even if CI passes, Brad MUST still check for review comments before marking the issue as complete.
 
-Failures are classified into one of the following
-categories:
+CI failures are classified into one of the following categories:
 
 - Code or logic errors
-
 - Test failures
-
 - Linter / formatting issues
-
 - Flaky tests
-
 - Infrastructure or configuration issues
 
 ### 7.4 Iteration Rules
 
-- Code-related failures  → 
-    return to Implementation & Local Testing Phase
+**Brad iterates based on both CI results AND review comments:**
 
-- Flaky tests  → retry
-    once, then escalate
+- **Code-related CI failures** → Invoke AI agent to fix, then re-monitor CI
+- **Flaky tests** → Retry once, then escalate
+- **Infrastructure/config failures** → Comment on PR and stop
+- **Review comments requiring changes** → Invoke AI agent to address comments, then re-monitor CI
 
-- Infrastructure/config failures 
-     → comment on PR and stop
+**Implementation details:**
 
-- Review comments requiring changes 
-     → return to Implementation & Local
-    Testing Phase
+1. If CI passes but review comments exist:
+   - Brad invokes the AI agent with the review comments
+   - AI agent addresses ALL comments
+   - Changes are committed and pushed (triggers new CI run)
+   - Brad re-monitors CI/CD pipeline
+   - Brad re-checks for new review comments
 
-Before iterating:
-
-- All addressed review comments are marked as resolved to avoid
-    confusion
+2. Iteration limits:
+   - Max review fix iterations: 3 (configurable via MAX_REVIEW_FIX_ITERATIONS)
+   - Max CI fix iterations: 5 (configurable via MAX_CI_FIX_ITERATIONS)
+   - If limits exceeded, Brad comments on JIRA and stops
 
 ## 8. Completion Criteria
 

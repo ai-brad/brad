@@ -13,6 +13,7 @@ from ci_analyzer import CIAnalyzer
 from repo_manager import RepoManager
 from ai_agent_interface import create_ai_agent_interface
 from adf_parser import adf_to_text
+from code_review_handler import CodeReviewHandler
 
 @dataclass
 class IssueState:
@@ -25,6 +26,7 @@ class IssueState:
     pr_number: Optional[int] = None
     clarification_count: int = 0
     ci_fix_count: int = 0
+    review_fix_count: int = 0
 
 
 class BradOrchestrator:
@@ -43,6 +45,7 @@ class BradOrchestrator:
         self.ci = CIAnalyzer(cfg)
         self.repo = RepoManager(cfg)
         self.agent = create_ai_agent_interface(cfg)
+        self.review_handler = CodeReviewHandler(cfg)
         
         self.logger.info(f"Brad orchestrator initialized with {cfg.ai_agent} agent")
     
@@ -55,7 +58,16 @@ class BradOrchestrator:
         self.logger.info("=" * 80)
         
         try:
-            # Fetch issues with BradReview label
+            # First, check for review comments on existing PRs
+            self.logger.info("Checking for code review comments...")
+            try:
+                processed_reviews = self.review_handler.process_review_comments()
+                if processed_reviews > 0:
+                    self.logger.info(f"Processed {processed_reviews} review comments")
+            except Exception as e:
+                self.logger.error(f"Failed to process review comments: {e}")
+            
+            # Then fetch issues with BradReview label
             issues = self.jira.fetch_issues_with_label("BradReview")
             
             if not issues:
@@ -143,7 +155,13 @@ class BradOrchestrator:
                 state.pr_number = pr_number
                 self._handle_ci_monitoring(state)
             else:
-                self.logger.warning(f"{issue_key}: Branch exists but no PR found - re-implementing")
+                self.logger.warning(f"{issue_key}: Branch exists but no PR found - deleting branch and re-implementing")
+                # Delete the remote branch before re-implementing
+                try:
+                    self.repo._run_git("push", "origin", "--delete", branch_name, check=False)
+                    self.logger.info(f"{issue_key}: Deleted remote branch")
+                except Exception as e:
+                    self.logger.warning(f"{issue_key}: Could not delete remote branch: {e}")
                 self._handle_implementation_phase(state)
         else:
             self.logger.info(f"{issue_key}: No feature branch - starting requirements phase")
@@ -155,9 +173,8 @@ class BradOrchestrator:
         """
         self.logger.info(f"{state.issue_key}: Requirements analysis phase")
         
-        # Ensure we're on main branch
-        self.repo.checkout_branch("main", create_if_missing=False)
-        self.repo._run_git("pull", "origin", "main")
+        # Reset to clean state on main branch to prevent contamination
+        self.repo.reset_to_clean_state("main")
         
         # Invoke AI agent for requirements analysis
         response = self.agent.invoke_requirements_analysis(
@@ -204,6 +221,9 @@ class BradOrchestrator:
         """
         self.logger.info(f"{state.issue_key}: Implementation phase")
         
+        # Reset to clean state first
+        self.repo.reset_to_clean_state("main")
+        
         # Prepare feature branch
         if not self.repo.branch_exists_remote(state.branch_name):
             self.logger.info(f"{state.issue_key}: Creating new feature branch")
@@ -211,7 +231,8 @@ class BradOrchestrator:
         else:
             self.logger.info(f"{state.issue_key}: Checking out existing feature branch")
             self.repo.checkout_branch(state.branch_name, create_if_missing=False)
-            self.repo._run_git("pull", "origin", state.branch_name)
+            # Reset to remote state to avoid local contamination
+            self.repo._run_git("reset", "--hard", f"origin/{state.branch_name}")
         
         # Invoke AI agent for implementation
         response = self.agent.invoke_implementation(
@@ -255,7 +276,8 @@ class BradOrchestrator:
     
     def _handle_ci_monitoring(self, state: IssueState):
         """
-        Monitor CI/CD pipeline and handle failures.
+        Monitor CI/CD pipeline and check for review comments.
+        According to design doc section 7.3, Brad must check BOTH CI results AND review comments.
         """
         if not state.pr_number:
             self.logger.error(f"{state.issue_key}: Cannot monitor CI - no PR number")
@@ -271,15 +293,29 @@ class BradOrchestrator:
         )
         
         if ci_result.success:
-            # CI passed - mark as ready for review
-            self.logger.info(f"{state.issue_key}: CI passed!")
+            # CI passed - now check for review comments (as per design doc 7.3)
+            self.logger.info(f"{state.issue_key}: CI passed! Now checking for review comments...")
             
-            try:
-                self.jira.set_status(state.issue_key, "REVIEW")
-            except Exception as e:
-                self.logger.warning(f"Could not set status to REVIEW: {e}")
+            review_comments = self.github.fetch_review_comments(state.pr_number)
             
-            self.jira.comment(state.issue_key, "Brad is done. ✅ All CI checks passed.")
+            if review_comments:
+                # Review comments exist - need to address them
+                self.logger.info(f"{state.issue_key}: Found {len(review_comments)} review comments to address")
+                self.jira.comment(
+                    state.issue_key,
+                    f"✅ CI passed, but there are {len(review_comments)} review comments to address. Brad is working on them..."
+                )
+                self._handle_review_fix(state, review_comments)
+            else:
+                # No review comments - truly done
+                self.logger.info(f"{state.issue_key}: No review comments - truly complete!")
+                
+                try:
+                    self.jira.set_status(state.issue_key, "REVIEW")
+                except Exception as e:
+                    self.logger.warning(f"Could not set status to REVIEW: {e}")
+                
+                self.jira.comment(state.issue_key, "Brad is done. ✅ All CI checks passed and no review comments to address.")
         
         else:
             # CI failed - attempt to fix
@@ -351,4 +387,69 @@ class BradOrchestrator:
             self.jira.comment(
                 state.issue_key,
                 f"Brad encountered an error while fixing CI:\n\n{message}\n\nBrad is stuck."
+            )
+    
+    def _handle_review_fix(self, state: IssueState, review_comments):
+        """
+        Handle PR review comments by invoking the AI agent to address them.
+        """
+        self.logger.info(f"{state.issue_key}: Review fix phase")
+        
+        # Check iteration limit
+        if state.review_fix_count >= self.cfg.max_review_fix_iterations:
+            self.logger.error(f"{state.issue_key}: Max review fix iterations reached")
+            self.jira.comment(
+                state.issue_key,
+                f"Brad is stuck - could not address all review comments after {state.review_fix_count} attempts."
+            )
+            return
+        
+        # Ensure we're on the feature branch
+        self.repo.checkout_branch(state.branch_name, create_if_missing=False)
+        self.repo._run_git("pull", "origin", state.branch_name)
+        
+        # Invoke AI agent for review fix
+        response = self.agent.invoke_review_fix(
+            issue_key=state.issue_key,
+            description=state.description,
+            review_comments=review_comments,
+            repo_path=str(self.repo.repo_path),
+            branch_name=state.branch_name,
+            pr_number=state.pr_number,
+            iteration=state.review_fix_count
+        )
+        
+        action = response.get("action")
+        message = response.get("message", "")
+        
+        self.logger.info(f"{state.issue_key}: AI agent action: {action}")
+        
+        if action == "fixed":
+            self.logger.info(f"{state.issue_key}: AI agent addressed review comments: {message}")
+            state.review_fix_count += 1
+            
+            self.jira.comment(
+                state.issue_key,
+                f"Brad addressed review comments (attempt {state.review_fix_count}):\n\n{message}\n\nWaiting for CI to re-run and checking for new review comments..."
+            )
+            
+            # Wait a bit for CI to start, then monitor again
+            import time
+            time.sleep(30)
+            self._handle_ci_monitoring(state)
+        
+        elif action == "stuck":
+            # AI agent couldn't address the comments
+            self.logger.error(f"{state.issue_key}: AI agent stuck on review fix: {message}")
+            self.jira.comment(
+                state.issue_key,
+                f"Brad is stuck - could not address review comments:\n\n{message}"
+            )
+        
+        else:
+            # Error
+            self.logger.error(f"{state.issue_key}: Review fix error: {message}")
+            self.jira.comment(
+                state.issue_key,
+                f"Brad encountered an error while addressing review comments:\n\n{message}\n\nBrad is stuck."
             )

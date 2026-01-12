@@ -71,6 +71,43 @@ class AIAgentInterface(ABC):
         
         return self._invoke_agent(prompt, repo_path, phase="implementation", attachment_paths=attachment_paths)
     
+    def invoke_review_fix(
+        self,
+        pr_number: int,
+        comment_id: int,
+        comment_body: str,
+        file_path: str,
+        line_number: int,
+        repo_path: str,
+        branch_name: str
+    ) -> Dict:
+        """
+        Invoke AI agent to address a code review comment.
+        
+        Returns dict with:
+        - action: "success" | "error"
+        - message: status message
+        """
+        self.logger.info(f"Invoking AI agent for review fix: PR #{pr_number}, comment {comment_id}")
+        
+        prompt = f"""You are Brad, an AI engineer. A code review comment was left on PR #{pr_number}.
+
+File: {file_path}
+Line: {line_number}
+
+Review Comment:
+{comment_body}
+
+Please address this review comment by:
+1. Reading the relevant code
+2. Understanding the concern
+3. Making appropriate changes
+4. Committing the changes with a descriptive message
+
+Be concise and direct in your fixes."""
+        
+        return self._invoke_agent(prompt, repo_path, phase="review_fix", attachment_paths=[])
+    
     def invoke_ci_fix(
         self,
         issue_key: str,
@@ -96,6 +133,7 @@ class AIAgentInterface(ABC):
         )
         
         return self._invoke_agent(prompt, repo_path, phase="ci_fix")
+    
     
     def _build_requirements_prompt(
         self,
@@ -382,6 +420,69 @@ If STUCK:
 
 Your response will be posted as a JIRA comment. Use plain text formatting only.
 """
+    
+    def _build_review_fix_prompt(
+        self,
+        issue_key: str,
+        description: str,
+        review_comments: List[Dict],
+        pr_number: int,
+        iteration: int
+    ) -> str:
+        """Build prompt for addressing PR review comments."""
+        # Format review comments
+        comments_text = ""
+        for i, comment in enumerate(review_comments, 1):
+            path = comment.get('path', 'N/A')
+            line = comment.get('line', 'N/A')
+            body = comment.get('body', '')
+            user = comment.get('user', {}).get('login', 'Unknown')
+            comments_text += f"\n{i}. File: {path}:{line}\n   Reviewer ({user}): {body}\n"
+        
+        return f"""You are Brad, addressing code review comments for JIRA issue {issue_key} (PR #{pr_number}).
+
+Iteration: {iteration}
+
+Original Requirements:
+{description}
+
+Code Review Comments:
+{comments_text}
+
+MANDATORY STEPS:
+1. Read and understand each review comment carefully
+2. Address each comment by making the requested changes to the code
+3. Run tests locally to ensure your changes don't break anything (pytest -n10 for backend, npm run prepare-commit for frontend)
+4. Only after tests pass: Commit with message "{issue_key}: Address review comments - <summary of changes>"
+5. Push changes (will update the PR automatically)
+
+CRITICAL REQUIREMENTS:
+- You MUST run tests locally before pushing (pytest -n10 and/or npm run prepare-commit)
+- DO NOT push if tests still fail locally
+- Address ALL review comments, not just some of them
+- Make sure your changes align with the reviewer's feedback
+- DO NOT create utility files like *_NOTES.md, *_PROGRESS.md, etc.
+
+Important:
+- You're already on the correct branch
+- The PR exists - just push your fixes
+- You have full access to the codebase and can make any necessary changes
+
+After addressing the comments, respond with a status update using plain text formatting (NO markdown):
+
+If FIXED (tests pass):
+- Summarize what changes you made in response to the review
+- Mention "Tests still pass locally (pytest -n10 [and/or npm run prepare-commit])"
+- Keep it clear and concise
+- Use plain text (→ for emphasis, NOT markdown bold/italic)
+
+If STUCK:
+- Explain what review comments you couldn't address and why
+- State clearly what's blocking you
+- Suggest what's needed to unblock
+
+Your response will be posted as a JIRA comment. Use plain text formatting only.
+"""
 
 
 class ClaudeCodeInterface(AIAgentInterface):
@@ -473,7 +574,8 @@ class OpenCodeInterface(AIAgentInterface):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.opencode_cli_path = cfg.opencode_cli_path
-        self.logger.info(f"Initialized OpenCode interface: {self.opencode_cli_path}")
+        self.opencode_model = cfg.opencode_model
+        self.logger.info(f"Initialized OpenCode interface: {self.opencode_cli_path} with model {self.opencode_model}")
     
     def _parse_conversational_response(self, output: str, phase: str) -> Dict:
         """Parse conversational OpenCode output into structured response."""
@@ -596,6 +698,19 @@ class OpenCodeInterface(AIAgentInterface):
             # Stuck on CI fix
             else:
                 self.logger.info("Detected stuck on CI fix")
+                return {"action": "stuck", "message": output}
+        
+        elif phase == "review_fix":
+            # Look for fix completion
+            if any(keyword in output_lower for keyword in [
+                'addressed', 'fixed', 'resolved', 'updated', 'changed', 'tests pass'
+            ]):
+                self.logger.info("Detected review fix completed")
+                return {"action": "fixed", "message": output}
+            
+            # Stuck on review fix
+            else:
+                self.logger.info("Detected stuck on review fix")
                 return {"action": "stuck", "message": output}
         
         # Fallback
