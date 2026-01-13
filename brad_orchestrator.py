@@ -221,6 +221,12 @@ class BradOrchestrator:
         """
         self.logger.info(f"{state.issue_key}: Implementation phase")
         
+        # Add JIRA comment that implementation is starting
+        self.jira.comment(
+            state.issue_key,
+            f"Brad is starting implementation for {state.issue_key}..."
+        )
+        
         # Reset to clean state first
         self.repo.reset_to_clean_state("main")
         
@@ -251,18 +257,31 @@ class BradOrchestrator:
         
         self.logger.info(f"{state.issue_key}: Claude action: {action}")
         
-        if action == "success" and pr_number:
-            # Implementation successful, PR created
-            self.logger.info(f"{state.issue_key}: Implementation successful, PR #{pr_number} created")
-            state.pr_number = pr_number
+        if action == "success":
+            # CRITICAL: Verify PR actually exists on GitHub
+            # Claude may claim success but not have created PR
+            verified_pr = self._verify_and_ensure_pr(state, pr_number, pr_url)
             
-            self.jira.comment(
-                state.issue_key,
-                f"Brad has completed implementation and opened PR #{pr_number}:\n{pr_url}\n\nMonitoring CI/CD..."
-            )
-            
-            # Monitor CI
-            self._handle_ci_monitoring(state)
+            if verified_pr:
+                pr_number, pr_url = verified_pr
+                state.pr_number = pr_number
+                
+                self.logger.info(f"{state.issue_key}: Implementation successful, PR #{pr_number} verified")
+                
+                self.jira.comment(
+                    state.issue_key,
+                    f"Brad has completed implementation and opened PR #{pr_number}:\n{pr_url}\n\nMonitoring CI/CD..."
+                )
+                
+                # Monitor CI
+                self._handle_ci_monitoring(state)
+            else:
+                # PR verification failed
+                self.logger.error(f"{state.issue_key}: PR claimed but could not be verified or created")
+                self.jira.comment(
+                    state.issue_key,
+                    f"Brad completed implementation but failed to create PR. Manual intervention needed."
+                )
         
         elif action == "stuck":
             # Claude couldn't complete implementation
@@ -273,6 +292,84 @@ class BradOrchestrator:
             # Error
             self.logger.error(f"{state.issue_key}: Implementation error: {message}")
             self.jira.comment(state.issue_key, f"Brad encountered an error during implementation:\n\n{message}\n\nBrad is stuck.")
+    
+    def _verify_and_ensure_pr(self, state: IssueState, claimed_pr_number: int, claimed_pr_url: str) -> tuple:
+        """
+        Verify that PR actually exists on GitHub. If not, attempt to create it.
+        Returns: (pr_number, pr_url) tuple if successful, None if failed
+        """
+        issue_key = state.issue_key
+        branch_name = state.branch_name
+        
+        # First check if PR number was claimed
+        if claimed_pr_number:
+            # Verify it actually exists
+            actual_pr = self.github.pr_exists_for_branch(branch_name)
+            if actual_pr == claimed_pr_number:
+                self.logger.info(f"{issue_key}: PR #{claimed_pr_number} verified on GitHub")
+                return (claimed_pr_number, claimed_pr_url)
+            else:
+                self.logger.warning(f"{issue_key}: Claimed PR #{claimed_pr_number} but found #{actual_pr} on GitHub")
+                if actual_pr:
+                    # Use the actual PR found
+                    pr_url = f"https://github.com/{self.cfg.github_repo}/pull/{actual_pr}"
+                    return (actual_pr, pr_url)
+        
+        # No claimed PR or verification failed - check if PR exists for branch
+        existing_pr = self.github.pr_exists_for_branch(branch_name)
+        if existing_pr:
+            self.logger.info(f"{issue_key}: Found existing PR #{existing_pr} for branch")
+            pr_url = f"https://github.com/{self.cfg.github_repo}/pull/{existing_pr}"
+            return (existing_pr, pr_url)
+        
+        # No PR exists - need to push branch and create PR
+        self.logger.warning(f"{issue_key}: No PR found - attempting to push branch and create PR")
+        
+        # Check if branch exists remotely
+        if not self.repo.branch_exists_remote(branch_name):
+            self.logger.info(f"{issue_key}: Branch not on remote - pushing now")
+            try:
+                self.repo.push(branch_name)
+            except Exception as e:
+                self.logger.error(f"{issue_key}: Failed to push branch: {e}")
+                return None
+        
+        # Create PR using gh CLI
+        try:
+            self.logger.info(f"{issue_key}: Creating PR via gh CLI")
+            import subprocess
+            result = subprocess.run(
+                [
+                    "gh", "pr", "create",
+                    "--repo", self.cfg.github_repo,
+                    "--base", "main",
+                    "--head", branch_name,
+                    "--title", f"Brad: {issue_key}",
+                    "--body", f"Automated PR for {issue_key}\n\nRelated: https://flaerobotics.atlassian.net/browse/{issue_key}"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(self.repo.repo_path)
+            )
+            
+            if result.returncode == 0:
+                # Extract PR URL from output
+                pr_url = result.stdout.strip().split('\n')[-1]
+                # Extract PR number from URL
+                import re
+                pr_match = re.search(r'/pull/(\d+)', pr_url)
+                if pr_match:
+                    pr_number = int(pr_match.group(1))
+                    self.logger.info(f"{issue_key}: Successfully created PR #{pr_number}")
+                    return (pr_number, pr_url)
+            
+            self.logger.error(f"{issue_key}: Failed to create PR: {result.stderr}")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"{issue_key}: Exception creating PR: {e}")
+            return None
     
     def _handle_ci_monitoring(self, state: IssueState):
         """

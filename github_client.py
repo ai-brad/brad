@@ -136,15 +136,29 @@ class GitHubClient:
             comments = self.fetch_review_comments(pr_number)
             needs_response = []
             
+            self.logger.info(f"PR #{pr_number}: Found {len(comments)} total review comments")
+            
             for comment in comments:
                 comment_id = comment['id']
+                comment_author = comment.get('user', {}).get('login', 'unknown')
+                comment_body_preview = comment.get('body', '')[:100]
+                
+                # Skip if comment itself is from Brad
+                if comment.get('body', '').startswith('Brad checking'):
+                    self.logger.debug(f"Comment {comment_id} is Brad's own response - skipping")
+                    continue
+                
+                # Check if there are any Brad replies to this comment
                 replies = self.get_comment_replies(pr_number, comment_id)
                 has_brad_response = any(
                     reply.get('body', '').startswith('Brad checking') 
                     for reply in replies
                 )
                 
-                if not has_brad_response and not comment.get('body', '').startswith('Brad checking'):
+                if has_brad_response:
+                    self.logger.debug(f"Comment {comment_id} by {comment_author} already has Brad response - skipping")
+                else:
+                    self.logger.info(f"Comment {comment_id} by {comment_author} NEEDS response: {comment_body_preview}...")
                     needs_response.append(comment)
             
             self.logger.info(f"PR #{pr_number}: {len(needs_response)} comments need response")

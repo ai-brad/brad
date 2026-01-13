@@ -47,15 +47,20 @@ class RepoManager:
     # -------------------------
 
     def prepare_branch(self, branch_name: str, base_branch: str = "main"):
-        """Prepare a feature branch from base branch."""
+        """Prepare a new feature branch from specified base branch."""
+        # CRITICAL: Always enforce main as base branch to prevent wrong base issues
+        if base_branch != "main":
+            self.logger.warning(f"Non-main base branch '{base_branch}' requested - forcing 'main'")
+            base_branch = "main"
+        
         self.logger.info(f"Preparing branch '{branch_name}' from '{base_branch}'")
         
-        # 1. Ensure base is up-to-date
-        self.logger.info(f"Fetching latest changes from origin")
-        self._run_git("fetch", "origin")
-        
+        # 1. Ensure we're on base branch with latest changes
         self.logger.info(f"Checking out {base_branch}")
         self._run_git("checkout", "-f", base_branch)
+        self._run_git("fetch", "origin")
+        self.logger.info(f"Resetting to origin/{base_branch}")
+        self._run_git("reset", "--hard", f"origin/{base_branch}")
         
         self.logger.info(f"Resetting to origin/{base_branch}")
         self._run_git("reset", "--hard", f"origin/{base_branch}")
