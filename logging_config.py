@@ -40,14 +40,16 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO"):
     file_handler = RotatingFileHandler(
         log_file,
         maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=5
+        backupCount=5,
+        encoding='utf-8'
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(detailed_formatter)
     root_logger.addHandler(file_handler)
     
-    # Console handler - less verbose
-    console_handler = logging.StreamHandler(sys.stdout)
+    # Console handler - less verbose (force UTF-8 on Windows)
+    console_stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8', errors='replace', closefd=False)
+    console_handler = logging.StreamHandler(console_stream)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)

@@ -1,18 +1,18 @@
 # Brad - Autonomous AI Software Engineer
 
-Brad is an autonomous AI software engineer that takes JIRA issues labeled with `BradReview`, implements them using an AI coding agent (Claude Code or OpenCode CLI), and delivers production-ready code via pull requests.
+Brad is an autonomous AI software engineer that takes JIRA issues labeled with `BradReview`, implements them using Azure OpenAI Responses API with tool-calling, and delivers production-ready code via pull requests.
 
 ## Architecture
 
-Brad is a **thin orchestration layer** that delegates all engineering decisions to Claude CLI (Claude Sonnet 4 with extended thinking) or OpenCode CLI. Brad's responsibilities:
+Brad is a **thin orchestration layer** that delegates all engineering decisions to an AI coding agent powered by Azure OpenAI. Brad's responsibilities:
 
 - Monitor JIRA for issues labeled "BradReview"
 - Download attachments and prepare git repository state
-- Invoke Claude CLI with complete context
+- Invoke the AI agent with complete context
 - Update JIRA based on outcomes
 - Monitor CI/CD pipelines
 
-**Claude CLI does all the thinking:**
+**The AI agent does all the thinking:**
 - Analyzes requirements for completeness
 - Proposes test scenarios
 - Implements code and tests
@@ -22,7 +22,7 @@ Brad is a **thin orchestration layer** that delegates all engineering decisions 
 ## Prerequisites
 
 1. **Python 3.12+**
-2. **Claude CLI** - Install from https://code.claude.com/docs/en/cli-reference
+2. **Azure OpenAI** - An Azure OpenAI resource with a deployed model (e.g. `gpt-5.2-codex`)
 3. **Git** - For repository operations
 4. **JIRA Account** with API access
 5. **GitHub Account** with API access
@@ -66,27 +66,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 5. Install AI CLI (Claude CLI or OpenCode)
-
-**Choose ONE of the following:**
-
-#### Option A: Claude CLI
-Follow instructions at: https://code.claude.com/docs/en/cli-reference
-
-Verify installation:
-```bash
-claude --version
-```
-
-#### Option B: OpenCode
-Follow instructions at: https://github.com/stackblitz/opencode
-
-Verify installation:
-```bash
-opencode --version
-```
-
-### 6. **REQUIRED:** Clone and Set Up the Target Repository (flaerobotics/bea)
+### 5. **REQUIRED:** Clone and Set Up the Target Repository (flaerobotics/bea)
 
 **This step is mandatory.** Brad works on a target repository that must be cloned and properly configured:
 
@@ -106,10 +86,8 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 uv sync
 ```
 
-3. **Configure your AI CLI to work in this repository:**
-   - Ensure Claude CLI or OpenCode is configured to operate within the cloned repository path
-   - The AI agent will execute commands and make changes in this directory
-   - This path will be specified as `TARGET_REPO_PATH` in your `.env` configuration (see Configuration section below)
+3. **Note:** The AI agent will execute commands and make changes in this directory.
+   This path will be specified as `TARGET_REPO_PATH` in your `.env` configuration (see Configuration section below).
 
 ## Configuration
 
@@ -125,20 +103,15 @@ JIRA_TOKEN=your-jira-api-token
 
 # GitHub Configuration
 GITHUB_TOKEN=your-github-token
-GITHUB_REPO=flaerobotics/bea  # Must be the flaerobotics/bea repository (set up in step 6)
+GITHUB_REPO=flaerobotics/bea
 
-# Target Repository (must be the absolute path to the cloned flaerobotics/bea repo from step 6)
-TARGET_REPO_PATH=/path/to/your/bea  # e.g., /home/user/projects/bea or C:/git/bea
+# Target Repository (absolute path to the cloned flaerobotics/bea repo from step 5)
+TARGET_REPO_PATH=C:\git\bea
 
-# AI Agent Configuration
-# Options: "claude" or "opencode"
-AI_AGENT=opencode
-
-# Claude CLI Configuration
-CLAUDE_CLI_PATH=claude
-
-# OpenCode CLI Configuration
-OPENCODE_CLI_PATH=opencode  # or full path if not in PATH
+# Azure OpenAI Configuration
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/openai/deployments/<deployment>/responses?api-version=2025-03-01-preview
+AZURE_OPENAI_API_KEY=your-api-key
+AZURE_OPENAI_MODEL=gpt-5.2-codex
 ```
 
 ### Optional Variables
@@ -240,7 +213,7 @@ When CI passes, Brad:
 
 - **Maximum clarification cycles:** 3 per issue
 - **Maximum CI fix iterations:** 5 per issue
-- **Session timeout:** 30 minutes per Claude CLI invocation
+- **Agent iteration limit:** 200 iterations per AI agent invocation
 - **No scope changes** - Brad never modifies requirements
 - **No auto-merge** - All PRs require human review
 
@@ -298,16 +271,8 @@ cat logs/brad_*.log | grep ERROR
 Common issues:
 - Invalid JIRA workflow transitions
 - GitHub API rate limits
-- Claude CLI timeout
+- Azure OpenAI rate limiting (auto-retried with exponential backoff)
 - Git conflicts
-
-### Claude CLI not found
-
-Ensure Claude CLI is installed and in PATH:
-```bash
-which claude  # Linux/macOS
-where claude  # Windows
-```
 
 ### JIRA API errors
 
@@ -330,11 +295,14 @@ See `AI Software Engineer.md` for complete specification.
 **Key Components:**
 - `brad.py` - Main entry point
 - `brad_orchestrator.py` - State machine and workflow logic
-- `claude_interface.py` - Claude CLI integration
+- `coding_agent.py` - Azure OpenAI Responses API agent with tool-calling
+- `ai_agent_interface.py` - Prompt building and response parsing
 - `jira_client.py` - JIRA API client
 - `github_client.py` - GitHub API client
 - `ci_analyzer.py` - CI/CD monitoring
 - `repo_manager.py` - Git operations
+- `phase_cache.py` - Requirements analysis caching
+- `test_selector.py` - Smart test selection from changed files
 - `config.py` - Configuration management
 - `logging_config.py` - Logging setup
 

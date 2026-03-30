@@ -22,6 +22,9 @@ logs/
 # Attachments
 attachments/
 
+# Brad phase cache
+.brad_cache/
+
 # Environment
 .env
 

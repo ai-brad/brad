@@ -2,6 +2,7 @@ import pytest
 import os
 from pathlib import Path
 from config import load_config, validate_config, Config
+from test_helpers import make_test_config
 
 
 def test_load_config_with_required_vars(monkeypatch):
@@ -21,7 +22,7 @@ def test_load_config_with_required_vars(monkeypatch):
     assert cfg.github_token == "gh-token"
     assert cfg.github_repo == "owner/repo"
     assert cfg.target_repo_path == "/fake/repo"
-    assert cfg.claude_cli_path == "claude"  # default
+    assert cfg.azure_openai_model == "gpt-5.2-codex"  # default
 
 
 def test_load_config_with_defaults(monkeypatch):
@@ -41,6 +42,13 @@ def test_load_config_with_defaults(monkeypatch):
     assert cfg.max_flaky_retries == 1
     assert cfg.ci_poll_interval == 60
     assert cfg.log_level == "INFO"
+    # Azure defaults
+    assert cfg.azure_credentials_json == ""
+    assert cfg.azure_resource_group == "TEST"
+    assert cfg.azure_aks_cluster == "bea-test2"
+    assert cfg.deployment_health_check is True
+    assert cfg.deployment_log_tail_lines == 200
+    assert cfg.deployment_log_since == "10m"
 
 
 def test_load_config_with_custom_values(monkeypatch):
@@ -64,22 +72,7 @@ def test_load_config_with_custom_values(monkeypatch):
 
 def test_validate_config_invalid_repo_path(tmp_path):
     """Test that validation fails with invalid repo path."""
-    cfg = Config(
-        jira_url="https://test.atlassian.net",
-        jira_token="token",
-        jira_user="user",
-        jira_project_key="DEV",
-        github_token="token",
-        github_repo="owner/repo",
-        target_repo_path="/nonexistent/path",
-        claude_cli_path="claude",
-        max_clarification_cycles=3,
-        max_ci_fix_iterations=5,
-        max_flaky_retries=1,
-        ci_poll_interval=60,
-        log_level="INFO",
-        attachments_dir=str(tmp_path / "attachments")
-    )
+    cfg = make_test_config(tmp_path, target_repo_path="/nonexistent/path")
     
     with pytest.raises(ValueError, match="Target repo path does not exist"):
         validate_config(cfg)
@@ -87,22 +80,7 @@ def test_validate_config_invalid_repo_path(tmp_path):
 
 def test_validate_config_not_git_repo(tmp_path):
     """Test that validation fails when path is not a git repo."""
-    cfg = Config(
-        jira_url="https://test.atlassian.net",
-        jira_token="token",
-        jira_user="user",
-        jira_project_key="DEV",
-        github_token="token",
-        github_repo="owner/repo",
-        target_repo_path=str(tmp_path),  # exists but not a git repo
-        claude_cli_path="claude",
-        max_clarification_cycles=3,
-        max_ci_fix_iterations=5,
-        max_flaky_retries=1,
-        ci_poll_interval=60,
-        log_level="INFO",
-        attachments_dir=str(tmp_path / "attachments")
-    )
+    cfg = make_test_config(tmp_path)  # exists but not a git repo
     
     with pytest.raises(ValueError, match="not a git repository"):
         validate_config(cfg)
@@ -114,22 +92,7 @@ def test_validate_config_valid(tmp_path):
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     
-    cfg = Config(
-        jira_url="https://test.atlassian.net",
-        jira_token="token",
-        jira_user="user",
-        jira_project_key="DEV",
-        github_token="token",
-        github_repo="owner/repo",
-        target_repo_path=str(tmp_path),
-        claude_cli_path="claude",
-        max_clarification_cycles=3,
-        max_ci_fix_iterations=5,
-        max_flaky_retries=1,
-        ci_poll_interval=60,
-        log_level="INFO",
-        attachments_dir=str(tmp_path / "attachments")
-    )
+    cfg = make_test_config(tmp_path)
     
     # Should not raise
     validate_config(cfg)

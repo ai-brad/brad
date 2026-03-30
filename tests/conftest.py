@@ -6,8 +6,9 @@ import logging
 import sys
 from pathlib import Path
 
-# Ensure the parent directory is in the path for imports
+# Ensure the parent directory and tests directory are in the path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 @pytest.fixture(autouse=True)

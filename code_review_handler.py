@@ -110,13 +110,18 @@ class CodeReviewHandler:
         try:
             # Use the AI agent interface's invoke method
             result = self.agent.invoke_review_fix(
-                pr_number=pr_number,
-                comment_id=comment_id,
-                comment_body=comment_body,
-                file_path=file_path,
-                line_number=line_number,
+                issue_key="",  # Not available in review handler context
+                description="",
+                review_comments=[{
+                    "path": file_path,
+                    "line": line_number,
+                    "body": comment_body,
+                    "user": {"login": "reviewer"},
+                }],
                 repo_path=self.cfg.target_repo_path,
-                branch_name=branch_name
+                branch_name=branch_name,
+                pr_number=pr_number,
+                iteration=0
             )
             
             if result.get('action') == 'error':

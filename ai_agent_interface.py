@@ -1,49 +1,43 @@
-import subprocess
+import re
 import json
 from typing import Dict, List, Optional
 from pathlib import Path
 from logging_config import get_logger
-from abc import ABC, abstractmethod
+from coding_agent import CodingAgent
+from codebase_map import get_codebase_map
 
 
-class AIAgentInterface(ABC):
+class AIAgentInterface:
     """
-    Abstract interface for AI coding agents.
-    Invokes fresh AI agent sessions with complete context.
+    AI agent interface powered by CodingAgent (Azure OpenAI Responses API).
+    Brad does everything directly — no external CLI tools needed.
+    Supports warm-start: pass previous_response_id to continue conversation context.
     """
     
     def __init__(self, cfg):
         self.logger = get_logger(__name__)
-        self.timeout = 1800  # 30 minutes
+        self.cfg = cfg
+        self.agent = CodingAgent(cfg)
     
-    @abstractmethod
-    def _invoke_agent(self, prompt: str, repo_path: str, phase: str, attachment_paths: List[str] = None) -> Dict:
-        """Invoke the AI agent with the given prompt."""
-        pass
-    
+    # ------------------------------------------------------------------
+    # Public methods called by BradOrchestrator
+    # ------------------------------------------------------------------
     def invoke_requirements_analysis(
         self,
         issue_key: str,
         description: str,
         attachment_paths: List[str],
         repo_path: str,
-        iteration: int
+        iteration: int,
+        previous_response_id: Optional[str] = None,
     ) -> Dict:
-        """
-        Invoke AI agent for requirements analysis phase.
-        
-        Returns dict with:
-        - action: "clarify" | "propose_scenarios" | "implement" | "error"
-        - message: text to post to JIRA
-        - details: additional context
-        """
-        self.logger.info(f"Invoking AI agent for requirements analysis: {issue_key}")
-        
-        prompt = self._build_requirements_prompt(
-            issue_key, description, attachment_paths, iteration
-        )
-        
-        return self._invoke_agent(prompt, repo_path, phase="requirements_analysis", attachment_paths=attachment_paths)
+        self.logger.info(f"Requirements analysis: {issue_key} (iteration {iteration})")
+        prompt = self._build_requirements_prompt(issue_key, description, attachment_paths, iteration)
+        codebase_map = get_codebase_map(repo_path)
+        output, response_id = self.agent.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self._parse_requirements_response(output)
+        result["_response_id"] = response_id
+        return result
     
     def invoke_implementation(
         self,
@@ -52,61 +46,35 @@ class AIAgentInterface(ABC):
         attachment_paths: List[str],
         repo_path: str,
         branch_name: str,
-        iteration: int
+        iteration: int,
+        previous_response_id: Optional[str] = None,
     ) -> Dict:
-        """
-        Invoke AI agent for implementation phase.
-        
-        Returns dict with:
-        - action: "success" | "stuck" | "error"
-        - pr_number: PR number if created
-        - pr_url: PR URL if created
-        - message: status message
-        """
-        self.logger.info(f"Invoking AI agent for implementation: {issue_key}")
-        
-        prompt = self._build_implementation_prompt(
-            issue_key, description, attachment_paths, branch_name, iteration
-        )
-        
-        return self._invoke_agent(prompt, repo_path, phase="implementation", attachment_paths=attachment_paths)
+        self.logger.info(f"Implementation: {issue_key} (iteration {iteration})")
+        prompt = self._build_implementation_prompt(issue_key, description, attachment_paths, branch_name, iteration)
+        codebase_map = get_codebase_map(repo_path)
+        output, response_id = self.agent.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self._parse_implementation_response(output)
+        result["_response_id"] = response_id
+        return result
     
     def invoke_review_fix(
         self,
-        pr_number: int,
-        comment_id: int,
-        comment_body: str,
-        file_path: str,
-        line_number: int,
+        issue_key: str,
+        description: str,
+        review_comments: List[Dict],
         repo_path: str,
-        branch_name: str
+        branch_name: str,
+        pr_number: int,
+        iteration: int,
+        previous_response_id: Optional[str] = None,
     ) -> Dict:
-        """
-        Invoke AI agent to address a code review comment.
-        
-        Returns dict with:
-        - action: "success" | "error"
-        - message: status message
-        """
-        self.logger.info(f"Invoking AI agent for review fix: PR #{pr_number}, comment {comment_id}")
-        
-        prompt = f"""You are Brad, an AI engineer. A code review comment was left on PR #{pr_number}.
-
-File: {file_path}
-Line: {line_number}
-
-Review Comment:
-{comment_body}
-
-Please address this review comment by:
-1. Reading the relevant code
-2. Understanding the concern
-3. Making appropriate changes
-4. Committing the changes with a descriptive message
-
-Be concise and direct in your fixes."""
-        
-        return self._invoke_agent(prompt, repo_path, phase="review_fix", attachment_paths=[])
+        self.logger.info(f"Review fix: {issue_key} PR#{pr_number} (iteration {iteration})")
+        prompt = self._build_review_fix_prompt(issue_key, description, review_comments, pr_number, iteration)
+        codebase_map = get_codebase_map(repo_path)
+        output, response_id = self.agent.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self._parse_review_fix_response(output)
+        result["_response_id"] = response_id
+        return result
     
     def invoke_ci_fix(
         self,
@@ -117,22 +85,37 @@ Be concise and direct in your fixes."""
         repo_path: str,
         branch_name: str,
         pr_number: int,
-        iteration: int
+        iteration: int,
+        failed_test_target: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
+    ) -> Dict:
+        self.logger.info(f"CI fix: {issue_key} PR#{pr_number} (iteration {iteration})")
+        prompt = self._build_ci_fix_prompt(
+            issue_key, description, ci_logs, failed_jobs, pr_number, iteration,
+            failed_test_target=failed_test_target,
+        )
+        codebase_map = get_codebase_map(repo_path)
+        output, response_id = self.agent.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self._parse_ci_fix_response(output)
+        result["_response_id"] = response_id
+        return result
+    
+    def invoke_local_review(
+        self,
+        issue_key: str,
+        description: str,
+        diff: str,
+        repo_path: str,
+        branch_name: str,
     ) -> Dict:
         """
-        Invoke AI agent for CI failure fix phase.
-        
-        Returns dict with:
-        - action: "fixed" | "stuck" | "error"
-        - message: status message
+        Invoke a FRESH agent session to review the implementation.
+        Returns dict with action: "approved" | "changes_requested" and message.
         """
-        self.logger.info(f"Invoking AI agent for CI fix: {issue_key} (iteration {iteration})")
-        
-        prompt = self._build_ci_fix_prompt(
-            issue_key, description, ci_logs, failed_jobs, pr_number, iteration
-        )
-        
-        return self._invoke_agent(prompt, repo_path, phase="ci_fix")
+        self.logger.info(f"Local review: {issue_key} on branch {branch_name}")
+        prompt = self._build_local_review_prompt(issue_key, description, diff, branch_name)
+        output, response_id = self.agent.run(prompt, repo_path)
+        return self._parse_local_review_response(output)
     
     
     def _build_requirements_prompt(
@@ -323,25 +306,30 @@ Requirements:
 MANDATORY IMPLEMENTATION STEPS (in order):
 1. Implement the feature according to requirements
 2. Write tests (unit tests mandatory, integration tests if needed)
-3. **RUN ALL TESTS LOCALLY** - This step is CRITICAL:
-   - Backend tests: Run `pytest -n10` and ensure ALL tests pass
-   - Frontend tests (if frontend changes): Run `npm run prepare-commit` and ensure it passes
-   - DO NOT proceed if ANY test fails - fix the failures first
-4. Only after ALL tests pass: Commit with message: "{issue_key}: <concise description>"
-5. Push the branch to origin
-6. Create a pull request against main branch with title "{issue_key}: <description>"
+3. **RUN ONLY THE RELEVANT TESTS** — This step is CRITICAL:
+   - The repo uses a .venv virtual environment — always use `.venv/Scripts/pytest.exe`, NOT bare pytest
+   - Determine which test directories correspond to the source files you changed:
+     src/bea/modules/<module>/... → tests/unit/modules/<module>/
+     src/bea/base/...             → tests/unit/base/
+     src/bea/common/...           → tests/unit/common/
+   - Run ONLY those test directories: `.venv/Scripts/pytest.exe -x <test_dirs> -v`
+   - Do NOT run the full test suite — that is what CI/CD is for
+   - DO NOT proceed if targeted tests fail — fix the failures first
+4. Only after tests pass: Commit with message: "{issue_key}: <concise description>"
+5. Push the branch to origin: `git push origin {branch_name}`
+6. Create a pull request: `gh pr create --repo {self.cfg.github_repo if hasattr(self, 'cfg') else 'flaerobotics/bea'} --base main --head {branch_name} --title "{issue_key}: <description>" --body "Automated PR for {issue_key}"`
 
 CRITICAL TEST REQUIREMENTS:
-- You MUST run `pytest -n10` in the backend directory before claiming success
-- If you made frontend changes, you MUST run `npm run prepare-commit` 
+- You MUST use .venv/Scripts/pytest.exe (NOT bare pytest) to run tests
+- Run ONLY tests relevant to the files you changed — never the full suite
 - DO NOT create a PR if tests fail locally
 - DO NOT claim implementation is complete if tests fail
-- If tests fail, analyze the failures, fix them, and re-run tests
+- If tests fail, analyze the failures, fix them, and re-run only the failing tests
 
 Important:
 - Follow existing code style exactly
 - DO NOT create utility files like *_ACCEPTANCE_CRITERIA.md, *_PROGRESS.md, etc.
-- You have full access to git operations and GitHub CLI/API
+- You have full access to git operations and gh CLI for PRs
 
 After completing the work AND TESTS PASS, respond with a status update formatted for JIRA:
 
@@ -371,9 +359,25 @@ Your response will be posted directly as a JIRA comment. Be clear and actionable
         ci_logs: str,
         failed_jobs: List[str],
         pr_number: int,
-        iteration: int
+        iteration: int,
+        failed_test_target: Optional[str] = None,
     ) -> str:
         """Build prompt for CI fix phase."""
+        if failed_test_target:
+            test_instruction = (
+                f"3. Re-run ONLY the previously failing tests to verify your fix:\n"
+                f"   `.venv/Scripts/pytest.exe -x {failed_test_target} -v`\n"
+                f"   - Do NOT run the full test suite — CI will handle that\n"
+                f"   - Use .venv/Scripts/pytest.exe, NOT bare pytest"
+            )
+        else:
+            test_instruction = (
+                "3. Re-run the relevant tests to verify your fix:\n"
+                "   - Determine test dirs from the files you changed (src/bea/modules/<m>/... → tests/unit/modules/<m>/)\n"
+                "   - `.venv/Scripts/pytest.exe -x <test_dirs> -v`\n"
+                "   - Do NOT run the full test suite — CI will handle that\n"
+                "   - Use .venv/Scripts/pytest.exe, NOT bare pytest"
+            )
         return f"""You are Brad, fixing CI failures for JIRA issue {issue_key} (PR #{pr_number}).
 
 Iteration: {iteration}
@@ -390,12 +394,13 @@ CI Logs:
 MANDATORY STEPS:
 1. Analyze the CI failure logs to understand what's failing
 2. Identify and fix the root cause
-3. Run tests locally to verify your fix (pytest -n10 for backend, npm run prepare-commit for frontend)
+{test_instruction}
 4. Only after tests pass locally: Commit with message "{issue_key}: Fix CI - <what was fixed>"
-5. Push changes (will re-trigger CI automatically)
+5. Push changes: `git push origin {issue_key}`
 
 CRITICAL REQUIREMENTS:
-- You MUST run tests locally before pushing (pytest -n10 and/or npm run prepare-commit)
+- You MUST use .venv/Scripts/pytest.exe (NOT bare pytest) to run tests
+- Run ONLY the previously failing tests — never the full suite
 - DO NOT push if tests still fail locally
 - Fix the actual issue, don't mask it or skip tests
 - DO NOT create utility files like *_NOTES.md, *_PROGRESS.md, etc.
@@ -409,7 +414,7 @@ After fixing, respond with a status update using plain text formatting (NO markd
 
 If FIXED (tests pass):
 - State what was wrong and what you changed
-- Mention "Tests now pass locally (pytest -n10 [and/or npm run prepare-commit])"
+- Mention which tests now pass locally
 - Keep it clear and concise
 - Use plain text (→ for emphasis, NOT markdown bold/italic)
 
@@ -452,12 +457,17 @@ Code Review Comments:
 MANDATORY STEPS:
 1. Read and understand each review comment carefully
 2. Address each comment by making the requested changes to the code
-3. Run tests locally to ensure your changes don't break anything (pytest -n10 for backend, npm run prepare-commit for frontend)
+3. Run ONLY the relevant tests:
+   - Determine test dirs from the files you changed (src/bea/modules/<m>/... → tests/unit/modules/<m>/)
+   - `.venv/Scripts/pytest.exe -x <test_dirs> -v`
+   - The repo uses a .venv virtual environment — always use .venv/Scripts/pytest.exe, NOT bare pytest
+   - Do NOT run the full test suite — CI will handle that
 4. Only after tests pass: Commit with message "{issue_key}: Address review comments - <summary of changes>"
-5. Push changes (will update the PR automatically)
+5. Push changes: `git push origin {issue_key}`
 
 CRITICAL REQUIREMENTS:
-- You MUST run tests locally before pushing (pytest -n10 and/or npm run prepare-commit)
+- You MUST use .venv/Scripts/pytest.exe (NOT bare pytest) to run tests
+- Run ONLY tests relevant to the files you changed — never the full suite
 - DO NOT push if tests still fail locally
 - Address ALL review comments, not just some of them
 - Make sure your changes align with the reviewer's feedback
@@ -485,348 +495,126 @@ Your response will be posted as a JIRA comment. Use plain text formatting only.
 """
 
 
-class ClaudeCodeInterface(AIAgentInterface):
-    """Interface to Claude CLI (claude code) for autonomous software engineering tasks."""
-    
-    def __init__(self, cfg):
-        super().__init__(cfg)
-        self.claude_cli_path = cfg.claude_cli_path
-        self.logger.info(f"Initialized Claude Code interface: {self.claude_cli_path}")
-    
-    def _invoke_agent(self, prompt: str, repo_path: str, phase: str, attachment_paths: List[str] = None) -> Dict:
-        """Invoke Claude CLI with the given prompt in the specified repository."""
-        self.logger.info(f"Invoking Claude CLI (phase: {phase})")
-        self.logger.debug(f"Repository: {repo_path}")
-        
-        try:
-            cmd = [
-                self.claude_cli_path,
-                "code",
-                "--project", repo_path,
-                "--dangerously-skip-approval",
-            ]
-            
-            self.logger.debug(f"Running: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=repo_path,
-            )
-            
-            if result.returncode != 0:
-                self.logger.error(f"Claude CLI failed with code {result.returncode}")
-                self.logger.error(f"stderr: {result.stderr}")
-                return {
-                    "action": "error",
-                    "message": f"Claude CLI failed: {result.stderr[:500]}",
-                    "details": result.stderr
-                }
-            
-            output = result.stdout.strip()
-            self.logger.debug(f"Claude output (first 500 chars): {output[:500]}")
-            
-            json_start = output.find("{")
-            json_end = output.rfind("}") + 1
-            
-            if json_start >= 0 and json_end > json_start:
-                json_str = output[json_start:json_end]
-                response = json.loads(json_str)
-                self.logger.info(f"Parsed response action: {response.get('action')}")
-                return response
-            else:
-                self.logger.error("No JSON found in Claude output")
-                return {
-                    "action": "error",
-                    "message": "Could not parse Claude response",
-                    "details": output[:1000]
-                }
-        
-        except subprocess.TimeoutExpired:
-            self.logger.error(f"Claude CLI timed out after {self.timeout}s")
-            return {
-                "action": "error",
-                "message": f"Claude CLI timed out after {self.timeout}s",
-                "details": "Timeout"
-            }
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse JSON response: {e}")
-            return {
-                "action": "error",
-                "message": f"Invalid JSON response from Claude: {e}",
-                "details": output[:1000] if 'output' in locals() else "N/A"
-            }
-        except Exception as e:
-            self.logger.error(f"Unexpected error invoking Claude: {e}", exc_info=True)
-            return {
-                "action": "error",
-                "message": f"Unexpected error: {str(e)}",
-                "details": str(e)
-            }
+    # ------------------------------------------------------------------
+    # Response parsers
+    # ------------------------------------------------------------------
+    def _parse_requirements_response(self, output: str) -> Dict:
+        output_lower = output.lower().strip()
+        if output.startswith("ERROR:"):
+            return {"action": "error", "message": output, "details": output}
+        # Ready takes priority — if requirements are clear, go straight to implementation
+        if any(kw in output_lower for kw in ['ready to implement', 'requirements are clear', 'can proceed']):
+            self.logger.info("Detected: ready to implement")
+            return {"action": "ready", "message": output, "details": ""}
+        # Only detect clarify if output explicitly starts with the expected format
+        if output_lower.startswith('clarifying questions'):
+            self.logger.info("Detected: clarification needed")
+            return {"action": "clarify", "message": output, "details": ""}
+        if any(kw in output_lower for kw in ['acceptance criteria', 'given', 'when', 'then']):
+            self.logger.info("Detected: acceptance criteria")
+            return {"action": "propose_scenarios", "message": output, "details": ""}
+        # Default to ready — bias toward action
+        self.logger.info("Defaulting to: ready to implement")
+        return {"action": "ready", "message": output, "details": ""}
 
-
-class OpenCodeInterface(AIAgentInterface):
-    """Interface to OpenCode CLI for autonomous software engineering tasks."""
-    
-    def __init__(self, cfg):
-        super().__init__(cfg)
-        self.opencode_cli_path = cfg.opencode_cli_path
-        self.opencode_model = cfg.opencode_model
-        self.logger.info(f"Initialized OpenCode interface: {self.opencode_cli_path} with model {self.opencode_model}")
-    
-    def _parse_conversational_response(self, output: str, phase: str) -> Dict:
-        """Parse conversational OpenCode output into structured response."""
-        import re
-        
-        # Strip unwanted analysis narration (but preserve PM instructions that start with "Hi!")
-        # Only strip if output starts with analysis phrases
-        unwanted_starts = [
-            "I'll analyze", "Let me analyze", "Let me check", "Let me search",
-            "Now let me", "Based on my analysis", "I've analyzed the codebase and"
-        ]
-        
-        lines = output.split('\n')
-        start_idx = 0
-        for i, line in enumerate(lines):
-            line_stripped = line.strip()
-            # Skip empty lines and unwanted analysis narration
-            if not line_stripped:
-                start_idx = i + 1
-                continue
-            # If we hit a line that starts with analysis, skip it
-            if any(line_stripped.startswith(phrase) for phrase in unwanted_starts):
-                start_idx = i + 1
-                continue
-            # Once we hit meaningful content (like "Hi!" or "ACCEPTANCE CRITERIA:"), stop skipping
-            break
-        
-        if start_idx > 0:
-            self.logger.debug(f"Stripped {start_idx} lines of analysis narration")
-            output = '\n'.join(lines[start_idx:])
-        
+    def _parse_implementation_response(self, output: str) -> Dict:
         output_lower = output.lower()
-        
-        # Extract PR information using regex
+        if output.startswith("ERROR:"):
+            return {"action": "error", "message": output, "pr_number": None, "pr_url": None}
+
+        # Check for test failures first
+        if any(kw in output_lower for kw in ['tests failed', 'test failed', 'implementation incomplete']):
+            self.logger.info("Detected: tests failed")
+            return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
+
+        # Extract PR info
         pr_match = re.search(r'pr\s*#?(\d+)', output_lower)
         pr_url_match = re.search(r'(https://github\.com/[^\s]+/pull/\d+)', output, re.IGNORECASE)
-        
-        if phase == "requirements_analysis":
-            # Look for clarifying questions
-            if any(keyword in output_lower for keyword in [
-                'clarifying questions', 'questions:', 'need to know', 
-                'please clarify', 'unclear', 'need clarification'
-            ]):
-                self.logger.info("Detected clarification needed")
-                return {"action": "clarify", "message": output, "details": ""}
-            
-            # Look for acceptance criteria
-            elif any(keyword in output_lower for keyword in [
-                'acceptance criteria', 'given', 'when', 'then',
-                'test scenario', 'acceptance test'
-            ]):
-                self.logger.info("Detected acceptance criteria proposal")
-                return {"action": "propose_scenarios", "message": output, "details": ""}
-            
-            # Look for ready signals
-            elif any(keyword in output_lower for keyword in [
-                'ready to implement', 'ready for implementation', 
-                'clear to proceed', 'requirements are clear', 'can proceed'
-            ]):
-                self.logger.info("Detected ready for implementation")
-                return {"action": "ready", "message": output, "details": ""}
-            
-            # Default to propose scenarios
-            else:
-                self.logger.info("Defaulting to propose scenarios")
-                return {"action": "propose_scenarios", "message": output, "details": ""}
-        
-        elif phase == "implementation":
-            # Look for test failures first (highest priority)
-            if any(keyword in output_lower for keyword in [
-                'tests failed', 'test failed', 'pytest failed', 'test failure',
-                'tests did not pass', 'tests are failing', 'failing tests',
-                'implementation incomplete'
-            ]):
-                self.logger.info("Detected test failures - implementation incomplete")
-                return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
-            
-            # Look for PR creation (only valid if tests passed)
-            if pr_match or pr_url_match or 'created pr' in output_lower or 'pull request' in output_lower:
-                pr_number = int(pr_match.group(1)) if pr_match else None
-                pr_url = pr_url_match.group(1) if pr_url_match else None
-                
-                # Check if output mentions tests passing
-                tests_passed = any(phrase in output_lower for phrase in [
-                    'tests passed', 'all tests pass', 'tests pass', 
-                    'pytest -n10', 'npm run prepare-commit'
-                ])
-                
-                if not tests_passed:
-                    self.logger.warning(f"PR created but no mention of passing tests")
-                
-                self.logger.info(f"Detected PR creation: #{pr_number} at {pr_url}")
-                return {
-                    "action": "success",
-                    "pr_number": pr_number,
-                    "pr_url": pr_url,
-                    "message": output
-                }
-            
-            # Look for stuck/blocked signals
-            elif any(keyword in output_lower for keyword in [
-                'stuck', 'cannot', 'unable to', 'blocked', 'failed to'
-            ]):
-                self.logger.info("Detected stuck/blocked state")
-                return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
-            
-            # Work in progress
-            else:
-                self.logger.info("Detected work in progress")
-                return {"action": "in_progress", "message": output, "pr_number": None, "pr_url": None}
-        
-        elif phase == "ci_fix":
-            # Look for fix completion
-            if any(keyword in output_lower for keyword in [
-                'fixed', 'resolved', 'corrected', 'should pass now', 'tests passing'
-            ]):
-                self.logger.info("Detected CI fix completed")
-                return {"action": "fixed", "message": output}
-            
-            # Stuck on CI fix
-            else:
-                self.logger.info("Detected stuck on CI fix")
-                return {"action": "stuck", "message": output}
-        
-        elif phase == "review_fix":
-            # Look for fix completion
-            if any(keyword in output_lower for keyword in [
-                'addressed', 'fixed', 'resolved', 'updated', 'changed', 'tests pass'
-            ]):
-                self.logger.info("Detected review fix completed")
-                return {"action": "fixed", "message": output}
-            
-            # Stuck on review fix
-            else:
-                self.logger.info("Detected stuck on review fix")
-                return {"action": "stuck", "message": output}
-        
-        # Fallback
-        self.logger.warning(f"Could not categorize response for phase {phase}")
-        return {"action": "error", "message": output, "details": "Could not categorize response"}
-    
-    def _invoke_agent(self, prompt: str, repo_path: str, phase: str, attachment_paths: List[str] = None) -> Dict:
-        """Invoke OpenCode CLI with the given prompt in the specified repository."""
-        import tempfile
-        import os
-        
-        self.logger.info(f"Invoking OpenCode CLI (phase: {phase})")
-        self.logger.debug(f"Repository: {repo_path}")
-        self.logger.debug(f"Prompt preview: {prompt[:200]}...")
-        
-        # Write prompt to temp file
-        prompt_file = None
-        try:
-            fd, prompt_file = tempfile.mkstemp(suffix='.txt', text=True, prefix='brad_prompt_')
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                f.write(prompt)
-            
-            self.logger.debug(f"Wrote prompt to: {prompt_file}")
-            
-            # Convert Windows paths to forward slashes for cross-platform compatibility
-            repo_path_unix = repo_path.replace('\\', '/')
-            prompt_file_unix = prompt_file.replace('\\', '/')
-            
-            # Build OpenCode command with attachments, then pipe prompt via stdin
-            opencode_cmd_parts = [
-                f'"{self.opencode_cli_path}"',
-                'run',
-                f'"{repo_path_unix}"',
-                '--model', 'opencode/minimax-m2.1-free'
-            ]
-            
-            # Add attachments
-            if attachment_paths:
-                for attachment_path in attachment_paths:
-                    attachment_path_unix = attachment_path.replace('\\', '/')
-                    opencode_cmd_parts.extend(['-f', f'"{attachment_path_unix}"'])
-                    self.logger.debug(f"Adding attachment: {attachment_path}")
-            
-            # Build PowerShell command that pipes prompt to opencode
-            # Read prompt from file and pipe to opencode with all arguments
-            opencode_cmd = ' '.join(opencode_cmd_parts)
-            ps_cmd = f'Get-Content "{prompt_file_unix}" -Raw | & {opencode_cmd}'
-            
-            self.logger.debug(f"Running PowerShell command")
-            
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',  # Replace invalid characters instead of failing
-                timeout=self.timeout,
-                cwd=repo_path,
-            )
-            
-            if result.returncode != 0:
-                self.logger.error(f"OpenCode CLI failed with code {result.returncode}")
-                self.logger.error(f"stderr: {result.stderr}")
-                return {
-                    "action": "error",
-                    "message": f"OpenCode CLI failed: {result.stderr[:500]}",
-                    "details": result.stderr
-                }
-            
-            if result.stdout is None:
-                self.logger.error("OpenCode output is None - likely encoding issue")
-                return {
-                    "action": "error",
-                    "message": "OpenCode CLI produced no output (encoding issue)",
-                    "details": f"stderr: {result.stderr if result.stderr else 'No stderr'}"
-                }
-            
-            output = result.stdout.strip()
-            self.logger.debug(f"OpenCode output (first 500 chars): {output[:500]}")
-            
-            # Parse conversational output based on phase
-            return self._parse_conversational_response(output, phase)
-        
-        except subprocess.TimeoutExpired:
-            self.logger.error(f"OpenCode CLI timed out after {self.timeout}s")
-            return {
-                "action": "error",
-                "message": f"OpenCode CLI timed out after {self.timeout}s",
-                "details": "Timeout"
-            }
-        except Exception as e:
-            self.logger.error(f"Unexpected error invoking OpenCode: {e}", exc_info=True)
-            return {
-                "action": "error",
-                "message": f"Unexpected error: {str(e)}",
-                "details": str(e)
-            }
-        finally:
-            # Clean up temp file
-            if prompt_file and os.path.exists(prompt_file):
-                try:
-                    os.remove(prompt_file)
-                    self.logger.debug(f"Cleaned up prompt file: {prompt_file}")
-                except Exception as e:
-                    self.logger.debug(f"Failed to clean up prompt file: {e}")
+        if pr_match or pr_url_match or 'created pr' in output_lower or 'pull request' in output_lower:
+            pr_number = int(pr_match.group(1)) if pr_match else None
+            pr_url = pr_url_match.group(1) if pr_url_match else None
+            self.logger.info(f"Detected: PR #{pr_number} at {pr_url}")
+            return {"action": "success", "pr_number": pr_number, "pr_url": pr_url, "message": output}
+
+        if any(kw in output_lower for kw in ['stuck', 'cannot', 'unable to', 'blocked']):
+            self.logger.info("Detected: stuck/blocked")
+            return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
+
+        self.logger.info("Detected: in progress (no PR yet)")
+        return {"action": "in_progress", "message": output, "pr_number": None, "pr_url": None}
+
+    def _parse_ci_fix_response(self, output: str) -> Dict:
+        output_lower = output.lower()
+        if output.startswith("ERROR:"):
+            return {"action": "error", "message": output}
+        if any(kw in output_lower for kw in ['fixed', 'resolved', 'tests passing', 'should pass now']):
+            self.logger.info("Detected: CI fix completed")
+            return {"action": "fixed", "message": output}
+        self.logger.info("Detected: stuck on CI fix")
+        return {"action": "stuck", "message": output}
+
+    def _parse_review_fix_response(self, output: str) -> Dict:
+        output_lower = output.lower()
+        if output.startswith("ERROR:"):
+            return {"action": "error", "message": output}
+        if any(kw in output_lower for kw in ['addressed', 'fixed', 'resolved', 'updated', 'tests pass']):
+            self.logger.info("Detected: review fix completed")
+            return {"action": "fixed", "message": output}
+        self.logger.info("Detected: stuck on review fix")
+        return {"action": "stuck", "message": output}
+
+    def _parse_local_review_response(self, output: str) -> Dict:
+        output_lower = output.lower()
+        if output.startswith("ERROR:"):
+            return {"action": "error", "message": output}
+        if any(kw in output_lower for kw in ['approved', 'lgtm', 'looks good', 'no issues']):
+            self.logger.info("Local review: APPROVED")
+            return {"action": "approved", "message": output}
+        self.logger.info("Local review: changes requested")
+        return {"action": "changes_requested", "message": output}
+
+    # ------------------------------------------------------------------
+    # Local review prompt
+    # ------------------------------------------------------------------
+    def _build_local_review_prompt(
+        self,
+        issue_key: str,
+        description: str,
+        diff: str,
+        branch_name: str,
+    ) -> str:
+        return f"""You are a senior code reviewer. Review the following changes for JIRA issue {issue_key}.
+
+Branch: {branch_name}
+
+Requirements:
+{description}
+
+Git diff of all changes:
+{diff}
+
+REVIEW INSTRUCTIONS:
+1. Use the tools to explore the codebase and understand context around the changes
+2. Check that the implementation matches the requirements
+3. Look for bugs, edge cases, missing error handling
+4. Check code style consistency with the rest of the codebase
+5. Verify test coverage
+
+RESPOND with ONE of:
+a) "APPROVED" - if the code is correct and ready to merge
+   - Briefly explain why it looks good
+   
+b) "CHANGES REQUESTED:" - if there are issues
+   - List each issue with file path and description
+   - Be specific about what needs to change
+   - Focus on real bugs and issues, not nitpicks
+
+Keep your review concise and actionable. This will be posted as a JIRA comment.
+"""
 
 
 def create_ai_agent_interface(cfg) -> AIAgentInterface:
-    """Factory function to create the appropriate AI agent interface based on config."""
+    """Create the AI agent interface. Single implementation — CodingAgent."""
     logger = get_logger(__name__)
-    
-    if cfg.ai_agent.lower() == "claude":
-        logger.info("Using Claude Code interface")
-        return ClaudeCodeInterface(cfg)
-    elif cfg.ai_agent.lower() == "opencode":
-        logger.info("Using OpenCode CLI interface")
-        return OpenCodeInterface(cfg)
-    else:
-        raise ValueError(f"Unknown AI agent: {cfg.ai_agent}. Must be 'claude' or 'opencode'")
+    logger.info("Creating DirectAgent (Azure OpenAI Responses API)")
+    return AIAgentInterface(cfg)

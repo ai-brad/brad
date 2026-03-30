@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 from repo_manager import RepoManager
 from config import Config
+from test_helpers import make_test_config
 
 
 @pytest.fixture
@@ -12,22 +13,7 @@ def mock_config(tmp_path):
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     
-    return Config(
-        jira_url="https://test.atlassian.net",
-        jira_token="test-token",
-        jira_user="test@example.com",
-        jira_project_key="DEV",
-        github_token="gh-token",
-        github_repo="owner/repo",
-        target_repo_path=str(tmp_path),
-        claude_cli_path="claude",
-        max_clarification_cycles=3,
-        max_ci_fix_iterations=5,
-        max_flaky_retries=1,
-        ci_poll_interval=60,
-        log_level="INFO",
-        attachments_dir=str(tmp_path / "attachments")
-    )
+    return make_test_config(tmp_path)
 
 
 @pytest.fixture

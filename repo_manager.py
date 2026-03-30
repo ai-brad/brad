@@ -191,6 +191,14 @@ class RepoManager:
         self.logger.debug(f"Current branch: {branch}")
         return branch
     
+    def get_head_commit(self, branch: str = "main") -> str:
+        """Return the short SHA of the HEAD commit on the given branch (remote)."""
+        result = self._run_git("rev-parse", "--short", f"origin/{branch}", check=False)
+        if result.returncode != 0:
+            # Fallback to local
+            result = self._run_git("rev-parse", "--short", branch, check=False)
+        return result.stdout.strip() or "unknown"
+
     def reset_to_clean_state(self, branch: str = "main"):
         """Reset repository to clean state on specified branch."""
         self.logger.info(f"Resetting to clean state on {branch}")

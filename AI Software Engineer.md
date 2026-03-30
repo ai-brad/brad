@@ -56,7 +56,7 @@ Brad exclusively uses existing engineering tools:
 
 - GitHub Actions (CI/CD)
 
-- Claude CLI (https://code.claude.com/docs/en/cli-reference) - Claude Sonnet 4 with extended thinking
+- Azure OpenAI Responses API (AI coding agent with tool-calling)
 
 No custom UIs are required.
 
@@ -91,7 +91,7 @@ This prevents concurrent or duplicate processing.
 
 ### 5.2 Inputs Analyzed
 
-Brad provides to Claude CLI:
+Brad provides to the AI agent:
 
 - JIRA issue Description (only)
 
@@ -192,7 +192,7 @@ This approval freezes requirements for the implementation phase.
 
 ### 6.1 Branch Preparation
 
-Brad performs the following git operations before invoking Claude CLI:
+Brad performs the following git operations before invoking the AI agent:
 
 - Changes to the target repository directory
 
@@ -208,9 +208,9 @@ Brad performs the following git operations before invoking Claude CLI:
 
 ### 6.2 Coding and Testing
 
-Brad invokes Claude CLI with full context (issue description, attachments, repository state).
+Brad invokes the AI agent with full context (issue description, attachments, repository state).
 
-Claude CLI is responsible for:
+The AI agent is responsible for:
 
 - Implementing the agreed behavior
 
@@ -224,7 +224,7 @@ Claude CLI is responsible for:
 
 - Pushing the feature branch to origin
 
-Claude CLI has full autonomy to perform all git operations (add, commit, push).
+The AI agent has full autonomy to perform all git operations (add, commit, push).
 
 ### 6.3 Local Exit Criteria
 
@@ -240,7 +240,7 @@ This phase is considered complete only when:
 
 ### 7.1 Opening the Pull Request
 
-Claude CLI (during its session):
+The AI agent (during its session):
 
 - Commits all changes with descriptive message referencing JIRA issue
 
@@ -250,7 +250,7 @@ Claude CLI (during its session):
 
 This automatically triggers the CI/CD pipeline.
 
-Brad receives the PR number from Claude CLI's output.
+Brad receives the PR number from the AI agent's output.
 
 ### 7.2 CI/CD Monitoring
 
@@ -357,7 +357,7 @@ Brad is a **thin orchestration layer** that:
 
 - Prepares git repository state (checkout correct branch)
 
-- Invokes Claude CLI with complete context
+- Invokes the AI agent with complete context
 
 - Polls CI/CD pipeline status after PR creation
 
@@ -365,9 +365,9 @@ Brad is a **thin orchestration layer** that:
 
 **Brad makes NO decisions** - it is purely a state machine and integration layer.
 
-### 2. Claude CLI (The Actual Engineer)
+### 2. AI Agent (The Actual Engineer)
 
-Claude CLI (Claude Sonnet 4 with extended thinking) is the **actual autonomous engineer** that:
+The Azure OpenAI coding agent is the **actual autonomous engineer** that:
 
 - Makes ALL decisions
 
@@ -391,9 +391,9 @@ Claude CLI (Claude Sonnet 4 with extended thinking) is the **actual autonomous e
 
 ### 3. Session Model
 
-**Each Brad invocation = Fresh Claude CLI session with complete context**
+**Each Brad invocation = Fresh AI agent session with complete context**
 
-Brad always starts a completely new Claude CLI session with:
+Brad always starts a new AI agent session with:
 - JIRA issue description
 - Paths to downloaded attachments
 - Repository path and current branch
@@ -408,17 +408,17 @@ During requirements analysis:
 
 2.  Brad ensures repository is on main branch
 
-3.  Brad invokes Claude CLI in "requirements analysis mode" with:
+3.  Brad invokes the AI agent in "requirements analysis mode" with:
     - Issue description
     - Attachment paths
     - Repository path
 
-4.  Claude CLI analyzes requirements and returns structured output indicating:
+4.  The AI agent analyzes requirements and returns structured output indicating:
     - Whether clarification is needed (with specific questions)
     - Whether test scenarios should be proposed
     - Whether implementation can proceed
 
-5.  Brad posts Claude CLI's output to JIRA as comment
+5.  Brad posts the AI agent's output to JIRA as comment
 
 6.  Brad keeps issue in "IN PROGRESS" status and stops
 
@@ -430,12 +430,12 @@ During implementation:
 
 1.  Brad creates feature branch (name = JIRA issue ID) from main
 
-2.  Brad invokes Claude CLI in "implementation mode" with:
+2.  Brad invokes the AI agent in "implementation mode" with:
     - Issue description
     - Attachment paths
     - Repository path (on feature branch)
 
-3.  Claude CLI autonomously:
+3.  The AI agent autonomously:
     - Implements code
     - Writes tests
     - Runs tests locally
@@ -444,14 +444,14 @@ During implementation:
     - Pushes feature branch to origin
     - Creates pull request
 
-4.  Claude CLI returns structured output with:
+4.  The AI agent returns structured output with:
     - Success/failure status
     - PR number (if created)
     - Any errors encountered
 
 5.  Brad polls CI/CD pipeline for the PR
 
-6.  If CI fails, Brad invokes Claude CLI again in "ci-fix mode" with CI logs
+6.  If CI fails, Brad invokes the AI agent again in "ci-fix mode" with CI logs
 
 ### 6. Safety Boundaries
 
@@ -463,9 +463,9 @@ Brad enforces these safety limits:
 
 - Maximum flaky test retries: 1
 
-- Session timeout: 30 minutes per Claude CLI invocation
+- Session timeout: 200 iterations per AI agent invocation
 
-Claude CLI must never:
+The AI agent must never:
 
 - Change the issue scope or requirements
 

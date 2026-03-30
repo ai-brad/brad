@@ -1,3 +1,3 @@
-This is a test attachment file for OpenCode CLI testing.
+This is a test attachment file for Brad testing.
 
 It contains some sample content to verify that attachments work correctly.

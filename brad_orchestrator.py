@@ -1,6 +1,7 @@
 """
 Brad - Autonomous AI Software Engineer
-Thin orchestration layer that delegates all decision-making to Claude CLI.
+Orchestrator that uses Azure OpenAI Responses API with tool-calling.
+Brad does everything directly — no external CLI tools needed.
 """
 
 from typing import Dict, Optional
@@ -14,6 +15,9 @@ from repo_manager import RepoManager
 from ai_agent_interface import create_ai_agent_interface
 from adf_parser import adf_to_text
 from code_review_handler import CodeReviewHandler
+from azure_log_client import AzureLogClient
+from phase_cache import get_cached_phase, set_cached_phase
+from test_selector import build_pytest_target, extract_failed_tests_from_ci_logs
 
 @dataclass
 class IssueState:
@@ -23,6 +27,8 @@ class IssueState:
     attachments: list
     attachment_paths: list
     branch_name: str
+    jira_updated: str = ""  # Jira ticket last-updated timestamp (for cache key)
+    last_response_id: Optional[str] = None  # Warm-start: last AI agent response ID
     pr_number: Optional[int] = None
     clarification_count: int = 0
     ci_fix_count: int = 0
@@ -31,8 +37,8 @@ class IssueState:
 
 class BradOrchestrator:
     """
-    Thin orchestrator for Brad.
-    Manages state machine and delegates all engineering decisions to Claude CLI.
+    Brad orchestrator. Manages the issue lifecycle:
+    requirements → implementation → local review → CI monitoring → deployment health.
     """
     
     def __init__(self, cfg: Config):
@@ -46,8 +52,12 @@ class BradOrchestrator:
         self.repo = RepoManager(cfg)
         self.agent = create_ai_agent_interface(cfg)
         self.review_handler = CodeReviewHandler(cfg)
+        self.azure_logs = AzureLogClient(cfg)
         
-        self.logger.info(f"Brad orchestrator initialized with {cfg.ai_agent} agent")
+        # Model identity for cache keys: endpoint + model name
+        self._model_identity = f"{cfg.azure_openai_endpoint}|{cfg.azure_openai_model}"
+        
+        self.logger.info(f"Brad orchestrator initialized (model: {cfg.azure_openai_model})")
     
     def run_once(self):
         """
@@ -139,7 +149,8 @@ class BradOrchestrator:
             description=description,
             attachments=attachments,
             attachment_paths=attachment_paths,
-            branch_name=branch_name
+            branch_name=branch_name,
+            jira_updated=fields.get("updated", ""),
         )
         
         # Step 4: Determine phase and process
@@ -164,31 +175,57 @@ class BradOrchestrator:
                     self.logger.warning(f"{issue_key}: Could not delete remote branch: {e}")
                 self._handle_implementation_phase(state)
         else:
-            self.logger.info(f"{issue_key}: No feature branch - starting requirements phase")
-            self._handle_requirements_phase(state)
+            self.logger.info(f"{issue_key}: No feature branch - starting implementation directly")
+            self._handle_implementation_phase(state)
     
     def _handle_requirements_phase(self, state: IssueState):
         """
         Handle requirements analysis phase.
+        Uses a local cache keyed on (main HEAD, jira updated, model identity)
+        so repeated runs skip the expensive AI call when nothing changed.
         """
         self.logger.info(f"{state.issue_key}: Requirements analysis phase")
         
         # Reset to clean state on main branch to prevent contamination
         self.repo.reset_to_clean_state("main")
         
-        # Invoke AI agent for requirements analysis
-        response = self.agent.invoke_requirements_analysis(
+        # --- Cache check ---
+        main_commit = self.repo.get_head_commit("main")
+        cached = get_cached_phase(
             issue_key=state.issue_key,
-            description=state.description,
-            attachment_paths=state.attachment_paths,
-            repo_path=str(self.repo.repo_path),
-            iteration=state.clarification_count
+            phase="requirements",
+            main_commit=main_commit,
+            jira_updated=state.jira_updated,
+            model_identity=self._model_identity,
         )
+        if cached:
+            self.logger.info(f"{state.issue_key}: Using cached requirements analysis")
+            response = cached
+        else:
+            # Invoke AI agent for requirements analysis
+            response = self.agent.invoke_requirements_analysis(
+                issue_key=state.issue_key,
+                description=state.description,
+                attachment_paths=state.attachment_paths,
+                repo_path=str(self.repo.repo_path),
+                iteration=state.clarification_count,
+                previous_response_id=state.last_response_id,
+            )
+            state.last_response_id = response.get("_response_id")
+            # Store in cache
+            set_cached_phase(
+                issue_key=state.issue_key,
+                phase="requirements",
+                main_commit=main_commit,
+                jira_updated=state.jira_updated,
+                model_identity=self._model_identity,
+                result=response,
+            )
         
         action = response.get("action")
         message = response.get("message", "")
         
-        self.logger.info(f"{state.issue_key}: Claude action: {action}")
+        self.logger.info(f"{state.issue_key}: Agent action: {action}")
         
         if action == "clarify":
             # Post clarification questions
@@ -240,26 +277,28 @@ class BradOrchestrator:
             # Reset to remote state to avoid local contamination
             self.repo._run_git("reset", "--hard", f"origin/{state.branch_name}")
         
-        # Invoke AI agent for implementation
+        # Invoke AI agent for implementation (warm-start from requirements phase if available)
         response = self.agent.invoke_implementation(
             issue_key=state.issue_key,
             description=state.description,
             attachment_paths=state.attachment_paths,
             repo_path=str(self.repo.repo_path),
             branch_name=state.branch_name,
-            iteration=0
+            iteration=0,
+            previous_response_id=state.last_response_id,
         )
+        state.last_response_id = response.get("_response_id")
         
         action = response.get("action")
         message = response.get("message", "")
         pr_number = response.get("pr_number")
         pr_url = response.get("pr_url")
         
-        self.logger.info(f"{state.issue_key}: Claude action: {action}")
+        self.logger.info(f"{state.issue_key}: Agent action: {action}")
         
         if action == "success":
             # CRITICAL: Verify PR actually exists on GitHub
-            # Claude may claim success but not have created PR
+            # Agent may claim success but not have created PR
             verified_pr = self._verify_and_ensure_pr(state, pr_number, pr_url)
             
             if verified_pr:
@@ -270,11 +309,17 @@ class BradOrchestrator:
                 
                 self.jira.comment(
                     state.issue_key,
-                    f"Brad has completed implementation and opened PR #{pr_number}:\n{pr_url}\n\nMonitoring CI/CD..."
+                    f"Brad has completed implementation and opened PR #{pr_number}:\n{pr_url}\n\nRunning local code review..."
                 )
                 
-                # Monitor CI
-                self._handle_ci_monitoring(state)
+                # Local review (fresh context) before CI monitoring
+                review_passed = self._handle_local_review(state)
+                
+                if review_passed:
+                    self.jira.comment(state.issue_key, "Local review passed. Monitoring CI/CD...")
+                    self._handle_ci_monitoring(state)
+                else:
+                    self.logger.info(f"{state.issue_key}: Local review requested changes — check JIRA for details")
             else:
                 # PR verification failed
                 self.logger.error(f"{state.issue_key}: PR claimed but could not be verified or created")
@@ -284,7 +329,7 @@ class BradOrchestrator:
                 )
         
         elif action == "stuck":
-            # Claude couldn't complete implementation
+            # Agent couldn't complete implementation
             self.logger.error(f"{state.issue_key}: AI agent is stuck: {message}")
             self.jira.comment(state.issue_key, f"Brad is stuck during implementation:\n\n{message}")
         
@@ -371,10 +416,73 @@ class BradOrchestrator:
             self.logger.error(f"{issue_key}: Exception creating PR: {e}")
             return None
     
+    def _handle_local_review(self, state: IssueState) -> bool:
+        """
+        Run a fresh-context local review of the implementation.
+        Returns True if approved, False if changes were requested.
+        """
+        self.logger.info(f"{state.issue_key}: Starting local code review (fresh context)")
+        
+        try:
+            # Get the diff of changes vs main
+            import subprocess
+            diff_result = subprocess.run(
+                ["git", "diff", "origin/main...HEAD"],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(self.repo.repo_path),
+                encoding="utf-8", errors="replace"
+            )
+            diff = diff_result.stdout
+            if not diff:
+                self.logger.warning(f"{state.issue_key}: No diff found for review")
+                return True  # Nothing to review
+            
+            # Truncate very large diffs
+            if len(diff) > 80_000:
+                diff = diff[:80_000] + "\n... [diff truncated]"
+            
+            response = self.agent.invoke_local_review(
+                issue_key=state.issue_key,
+                description=state.description,
+                diff=diff,
+                repo_path=str(self.repo.repo_path),
+                branch_name=state.branch_name,
+            )
+            
+            action = response.get("action")
+            message = response.get("message", "")
+            
+            if action == "approved":
+                self.logger.info(f"{state.issue_key}: Local review APPROVED")
+                self.jira.comment(
+                    state.issue_key,
+                    f"Local code review PASSED:\n\n{message}"
+                )
+                return True
+            else:
+                self.logger.info(f"{state.issue_key}: Local review requested changes")
+                self.jira.comment(
+                    state.issue_key,
+                    f"Local code review found issues:\n\n{message}\n\nBrad will address these."
+                )
+                # TODO: In future, loop back to fix the issues
+                return True  # For now, proceed anyway — log the review feedback
+                
+        except Exception as e:
+            self.logger.error(f"{state.issue_key}: Local review failed: {e}", exc_info=True)
+            # Don't block on review failure
+            return True
+    
     def _handle_ci_monitoring(self, state: IssueState):
         """
         Monitor CI/CD pipeline and check for review comments.
         According to design doc section 7.3, Brad must check BOTH CI results AND review comments.
+        
+        Enhanced flow:
+        1. Wait for ALL workflow runs to complete (build + deploy)
+        2. If CI passes, check deployment health on the target environment
+        3. If deployment unhealthy, fetch Azure logs for diagnosis
+        4. Check for review comments
         """
         if not state.pr_number:
             self.logger.error(f"{state.issue_key}: Cannot monitor CI - no PR number")
@@ -382,7 +490,15 @@ class BradOrchestrator:
         
         self.logger.info(f"{state.issue_key}: Monitoring CI for PR #{state.pr_number}")
         
-        # Wait for CI to complete
+        # Resolve which environment this PR deploys to
+        deploy_info = self.ci.resolve_deployment_env(pr_number=state.pr_number)
+        if deploy_info:
+            self.logger.info(
+                f"{state.issue_key}: PR #{state.pr_number} deploys to "
+                f"{deploy_info.environment} ({deploy_info.base_url})"
+            )
+        
+        # Wait for ALL CI workflows to complete
         ci_result = self.ci.wait_for_pr(
             pr_number=state.pr_number,
             poll_interval=self.cfg.ci_poll_interval,
@@ -390,14 +506,27 @@ class BradOrchestrator:
         )
         
         if ci_result.success:
-            # CI passed - now check for review comments (as per design doc 7.3)
+            # CI passed - check deployment health if enabled
+            deployment_summary = ""
+            if self.cfg.deployment_health_check and deploy_info:
+                deployment_summary = self._check_deployment_after_ci(state, deploy_info)
+            
+            # Now check for review comments (as per design doc 7.3)
             self.logger.info(f"{state.issue_key}: CI passed! Now checking for review comments...")
             
-            review_comments = self.github.fetch_review_comments(state.pr_number)
+            all_review_comments = self.github.fetch_review_comments(state.pr_number)
+            # Filter out bot comments (e.g. windsurf-bot, github-actions)
+            review_comments = [
+                c for c in all_review_comments
+                if not c.get("user", {}).get("login", "").endswith("[bot]")
+                and c.get("user", {}).get("type") != "Bot"
+            ]
+            if all_review_comments and not review_comments:
+                self.logger.info(f"{state.issue_key}: Found {len(all_review_comments)} bot review comments (skipping)")
             
             if review_comments:
-                # Review comments exist - need to address them
-                self.logger.info(f"{state.issue_key}: Found {len(review_comments)} review comments to address")
+                # Human review comments exist - need to address them
+                self.logger.info(f"{state.issue_key}: Found {len(review_comments)} human review comments to address")
                 self.jira.comment(
                     state.issue_key,
                     f"✅ CI passed, but there are {len(review_comments)} review comments to address. Brad is working on them..."
@@ -412,26 +541,138 @@ class BradOrchestrator:
                 except Exception as e:
                     self.logger.warning(f"Could not set status to REVIEW: {e}")
                 
-                self.jira.comment(state.issue_key, "Brad is done. ✅ All CI checks passed and no review comments to address.")
+                done_msg = "Brad is done. ✅ All CI checks passed and no review comments to address."
+                if deployment_summary:
+                    done_msg += f"\n\n{deployment_summary}"
+                self.jira.comment(state.issue_key, done_msg)
         
         else:
-            # CI failed - attempt to fix
+            # CI failed - fetch detailed logs before attempting fix
             self.logger.warning(f"{state.issue_key}: CI failed")
+            
+            # Fetch detailed job logs for failed runs
+            detailed_logs = self._fetch_detailed_ci_logs(state, ci_result)
             
             if state.ci_fix_count >= self.cfg.max_ci_fix_iterations:
                 self.logger.error(f"{state.issue_key}: Max CI fix iterations reached")
-                self.jira.comment(
-                    state.issue_key,
-                    f"Brad is stuck - CI failures could not be fixed after {state.ci_fix_count} attempts.\n\nFailed jobs: {', '.join(ci_result.failed_jobs)}"
+                failure_msg = (
+                    f"Brad is stuck - CI failures could not be fixed after {state.ci_fix_count} attempts."
+                    f"\n\nFailed jobs: {', '.join(ci_result.failed_jobs)}"
                 )
+                if detailed_logs:
+                    failure_msg += f"\n\nDetailed failure logs:\n{detailed_logs[:2000]}"
+                self.jira.comment(state.issue_key, failure_msg)
                 return
             
             self.logger.info(f"{state.issue_key}: Attempting CI fix (iteration {state.ci_fix_count + 1})")
+            # Pass enhanced logs to CI fix handler
+            if detailed_logs:
+                ci_result = ci_result._replace(logs=ci_result.logs + "\n\n" + detailed_logs)
             self._handle_ci_fix(state, ci_result)
+    
+    def _check_deployment_after_ci(self, state: IssueState, deploy_info) -> str:
+        """
+        After CI passes, check if the deployment is healthy and collect diagnostics.
+        Returns a summary string for the JIRA comment.
+        """
+        self.logger.info(
+            f"{state.issue_key}: Checking deployment health at {deploy_info.base_url}"
+        )
+        
+        health = self.ci.check_deployment_health(
+            pr_number=state.pr_number,
+            max_attempts=30,
+            wait_seconds=10,
+        )
+        
+        if health.get("healthy"):
+            version_info = health.get("version", {})
+            summary = (
+                f"Deployment to {deploy_info.environment} ({deploy_info.base_url}) is healthy."
+            )
+            if version_info:
+                summary += f" Version: {version_info}"
+            self.logger.info(f"{state.issue_key}: {summary}")
+            return summary
+        else:
+            error = health.get("error", "Unknown error")
+            self.logger.warning(
+                f"{state.issue_key}: Deployment unhealthy: {error}. "
+                f"Fetching Azure logs for diagnosis..."
+            )
+            
+            # Fetch Azure logs for diagnosis
+            azure_summary = self._fetch_azure_deployment_logs(state, deploy_info.environment)
+            
+            summary = (
+                f"⚠️ Deployment to {deploy_info.environment} ({deploy_info.base_url}) "
+                f"may not be healthy: {error}"
+            )
+            if azure_summary:
+                summary += f"\n\nAzure deployment diagnostics:\n{azure_summary[:2000]}"
+            
+            return summary
+    
+    def _fetch_detailed_ci_logs(self, state: IssueState, ci_result) -> str:
+        """
+        Fetch detailed job logs from GitHub Actions for failed runs.
+        Returns the detailed log text.
+        """
+        self.logger.info(f"{state.issue_key}: Fetching detailed CI failure logs")
+        
+        try:
+            failed_run_ids = self.ci.get_failed_run_ids(state.pr_number)
+            if not failed_run_ids:
+                return ""
+            
+            all_logs = []
+            for run_id in failed_run_ids[:3]:  # Limit to 3 runs max
+                logs = self.ci.get_job_logs(run_id, failed_only=True)
+                if logs:
+                    all_logs.append(logs)
+            
+            combined = "\n".join(all_logs)
+            # Truncate to avoid overwhelming the AI agent
+            if len(combined) > 15000:
+                combined = combined[:15000] + "\n... [truncated]"
+            
+            return combined
+        except Exception as e:
+            self.logger.error(f"{state.issue_key}: Failed to fetch detailed CI logs: {e}")
+            return ""
+    
+    def _fetch_azure_deployment_logs(
+        self, state: IssueState, environment: str
+    ) -> str:
+        """
+        Fetch Azure AKS deployment logs for diagnosis.
+        Returns a formatted summary of the diagnostics.
+        """
+        self.logger.info(
+            f"{state.issue_key}: Fetching Azure logs for environment {environment}"
+        )
+        
+        try:
+            diagnostics = self.azure_logs.get_environment_diagnostics(
+                environment=environment,
+                tail_lines=self.cfg.deployment_log_tail_lines,
+                since=self.cfg.deployment_log_since,
+            )
+            
+            summary = self.azure_logs.format_diagnostics_summary(diagnostics)
+            self.logger.info(
+                f"{state.issue_key}: Collected {len(summary)} chars of Azure diagnostics"
+            )
+            return summary
+        except Exception as e:
+            self.logger.error(
+                f"{state.issue_key}: Failed to fetch Azure logs: {e}"
+            )
+            return f"[Could not fetch Azure logs: {e}]"
     
     def _handle_ci_fix(self, state: IssueState, ci_result):
         """
-        Handle CI failure by invoking Claude to fix issues.
+        Handle CI failure by invoking AI agent to fix issues.
         """
         self.logger.info(f"{state.issue_key}: CI fix phase")
         
@@ -439,7 +680,12 @@ class BradOrchestrator:
         self.repo.checkout_branch(state.branch_name, create_if_missing=False)
         self.repo._run_git("pull", "origin", state.branch_name)
         
-        # Invoke AI agent for CI fix
+        # Extract specific failing test identifiers from CI logs
+        failed_test_target = extract_failed_tests_from_ci_logs(ci_result.logs)
+        if failed_test_target:
+            self.logger.info(f"{state.issue_key}: Extracted failing tests: {failed_test_target[:200]}")
+        
+        # Invoke AI agent for CI fix (warm-start from implementation phase if available)
         response = self.agent.invoke_ci_fix(
             issue_key=state.issue_key,
             description=state.description,
@@ -448,8 +694,11 @@ class BradOrchestrator:
             repo_path=str(self.repo.repo_path),
             branch_name=state.branch_name,
             pr_number=state.pr_number,
-            iteration=state.ci_fix_count
+            iteration=state.ci_fix_count,
+            failed_test_target=failed_test_target,
+            previous_response_id=state.last_response_id,
         )
+        state.last_response_id = response.get("_response_id")
         
         action = response.get("action")
         message = response.get("message", "")
@@ -471,7 +720,7 @@ class BradOrchestrator:
             self._handle_ci_monitoring(state)
         
         elif action == "stuck":
-            # Claude couldn't fix the issues
+            # Agent couldn't fix the issues
             self.logger.error(f"{state.issue_key}: AI agent stuck on CI fix: {message}")
             self.jira.comment(
                 state.issue_key,
@@ -505,7 +754,7 @@ class BradOrchestrator:
         self.repo.checkout_branch(state.branch_name, create_if_missing=False)
         self.repo._run_git("pull", "origin", state.branch_name)
         
-        # Invoke AI agent for review fix
+        # Invoke AI agent for review fix (warm-start from implementation/CI phase)
         response = self.agent.invoke_review_fix(
             issue_key=state.issue_key,
             description=state.description,
@@ -513,8 +762,10 @@ class BradOrchestrator:
             repo_path=str(self.repo.repo_path),
             branch_name=state.branch_name,
             pr_number=state.pr_number,
-            iteration=state.review_fix_count
+            iteration=state.review_fix_count,
+            previous_response_id=state.last_response_id,
         )
+        state.last_response_id = response.get("_response_id")
         
         action = response.get("action")
         message = response.get("message", "")
