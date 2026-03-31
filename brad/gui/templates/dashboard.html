@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block loading_overlay %}
+<div id="loading-overlay" class="loading-overlay">
+    <div class="loading-content">
+        <img src="{{ url_for('static', filename='bradlogo.png') }}" alt="Brad" class="loading-logo">
+        <div class="loading-bar"><div class="loading-bar-fill"></div></div>
+        <p class="loading-text">Initializing Brad...</p>
+    </div>
+</div>
+<script>
+    setTimeout(function() {
+        var overlay = document.getElementById('loading-overlay');
+        if (overlay) {
+            overlay.classList.add('fade-out');
+            setTimeout(function() { overlay.style.display = 'none'; }, 500);
+        }
+    }, 2500);
+</script>
+{% endblock %}
+
+{% block content %}
+
+<div class="card" id="status-card">
+    <h2>Backend Status</h2>
+    {% if running %}
+    <div class="status-box active">
+        <span class="status-dot active"></span>
+        <div>
+            <strong>Processing:</strong>
+            <a href="{{ jira_url }}/browse/{{ running.issue_key }}" target="_blank" class="issue-link">{{ running.issue_key }}</a>
+            {% if running.summary %} — {{ running.summary }}{% endif %}
+            <br><small>Started: <span data-utc="{{ running.started_at }}">{{ running.started_at }}</span></small>
+        </div>
+    </div>
+    {% else %}
+    <div class="status-box idle">
+        <span class="status-dot idle"></span>
+        <div><strong>Idle</strong> — No issues currently being processed</div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="stats-grid" id="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value" id="stat-executions">{{ totals.total_executions or 0 }}</div>
+        <div class="stat-label">Total Executions</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-prompt-tokens">{{ "{:,}".format(totals.total_prompt_tokens or 0) }}</div>
+        <div class="stat-label">Prompt Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-completion-tokens">{{ "{:,}".format(totals.total_completion_tokens or 0) }}</div>
+        <div class="stat-label">Completion Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value cost" id="stat-cost">${{ "%.2f"|format(totals.total_cost or 0) }}</div>
+        <div class="stat-label">Total Cost</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Recent Executions</h2>
+    <div id="recent-table-container">
+    {% if recent %}
+    <table>
+        <thead>
+            <tr>
+                <th>Issue</th>
+                <th>Summary</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>PR</th>
+                <th>Cost</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="recent-tbody">
+        {% for ex in recent %}
+            <tr>
+                <td><a href="{{ jira_url }}/browse/{{ ex.issue_key }}" target="_blank" class="issue-link"><strong>{{ ex.issue_key }}</strong></a></td>
+                <td>{{ ex.summary[:60] }}{% if ex.summary|length > 60 %}…{% endif %}</td>
+                <td>
+                    <span class="badge badge-{{ ex.status }}">{{ ex.status }}</span>
+                </td>
+                <td><span data-utc="{{ ex.started_at }}">{{ ex.started_at[:16] }}</span></td>
+                <td>
+                    {% if ex.pr_url %}
+                    <a href="{{ ex.pr_url }}" target="_blank">PR #{{ ex.pr_number }}</a>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="cost">${{ "%.4f"|format(ex.total_cost or 0) }}</td>
+                <td><a href="/execution/{{ ex.id }}">Details →</a></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <p>No executions yet. Brad will record them here once it starts processing issues.</p>
+    </div>
+    {% endif %}
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+var JIRA_URL = {{ jira_url|tojson }};
+var GITHUB_REPO = {{ github_repo|tojson }};
+
+function fmtNum(n) { return (n || 0).toLocaleString(); }
+function fmtCost(n) { return '$' + (n || 0).toFixed(2); }
+function fmtCost4(n) { return '$' + (n || 0).toFixed(4); }
+function truncate(s, n) { return s && s.length > n ? s.substring(0, n) + '…' : (s || ''); }
+
+function badgeClass(status) {
+    if (status === 'completed') return 'badge-completed';
+    if (status === 'running') return 'badge-running';
+    if (status === 'error') return 'badge-error';
+    if (status === 'stuck') return 'badge-stuck';
+    return 'badge-running';
+}
+
+function refreshDashboard() {
+    fetch('/api/dashboard')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            // Update stats
+            document.getElementById('stat-executions').textContent = fmtNum(data.totals.total_executions);
+            document.getElementById('stat-prompt-tokens').textContent = fmtNum(data.totals.total_prompt_tokens);
+            document.getElementById('stat-completion-tokens').textContent = fmtNum(data.totals.total_completion_tokens);
+            document.getElementById('stat-cost').textContent = fmtCost(data.totals.total_cost);
+
+            // Update status card
+            var sc = document.getElementById('status-card');
+            if (data.running) {
+                sc.querySelector('.status-box').className = 'status-box active';
+                sc.querySelector('.status-dot').className = 'status-dot active';
+                sc.querySelector('div > div').innerHTML =
+                    '<strong>Processing:</strong> <a href="' + JIRA_URL + '/browse/' + data.running.issue_key + '" target="_blank" class="issue-link">' + data.running.issue_key + '</a>' +
+                    (data.running.summary ? ' — ' + data.running.summary : '') +
+                    '<br><small>Started: ' + fmtLocalTime(data.running.started_at) + '</small>';
+            } else {
+                sc.querySelector('.status-box').className = 'status-box idle';
+                sc.querySelector('.status-dot').className = 'status-dot idle';
+                sc.querySelector('div > div').innerHTML = '<strong>Idle</strong> — No issues currently being processed';
+            }
+
+            // Update table
+            if (data.recent && data.recent.length > 0) {
+                var html = '';
+                data.recent.forEach(function(ex) {
+                    var prCell = ex.pr_url
+                        ? '<a href="' + ex.pr_url + '" target="_blank">PR #' + ex.pr_number + '</a>'
+                        : '—';
+                    html += '<tr>' +
+                        '<td><a href="' + JIRA_URL + '/browse/' + ex.issue_key + '" target="_blank" class="issue-link"><strong>' + ex.issue_key + '</strong></a></td>' +
+                        '<td>' + truncate(ex.summary, 60) + '</td>' +
+                        '<td><span class="badge ' + badgeClass(ex.status) + '">' + ex.status + '</span></td>' +
+                        '<td>' + fmtLocalTime(ex.started_at) + '</td>' +
+                        '<td>' + prCell + '</td>' +
+                        '<td class="cost">' + fmtCost4(ex.total_cost) + '</td>' +
+                        '<td><a href="/execution/' + ex.id + '">Details →</a></td>' +
+                        '</tr>';
+                });
+                var tbody = document.getElementById('recent-tbody');
+                if (tbody) tbody.innerHTML = html;
+            }
+        })
+        .catch(function(e) { console.error('Poll error:', e); });
+}
+
+setInterval(refreshDashboard, 5000);
+</script>
+{% endblock %}

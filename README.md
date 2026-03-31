@@ -1,315 +1,130 @@
 # Brad - Autonomous AI Software Engineer
 
-Brad is an autonomous AI software engineer that takes JIRA issues labeled with `BradReview`, implements them using Azure OpenAI Responses API with tool-calling, and delivers production-ready code via pull requests.
+Brad is an autonomous AI software engineer that takes JIRA issues labeled with `BradReview`, implements them using an LLM-powered coding agent, and delivers production-ready code via pull requests.
 
 ## Architecture
 
-Brad is a **thin orchestration layer** that delegates all engineering decisions to an AI coding agent powered by Azure OpenAI. Brad's responsibilities:
+Brad is a **thin orchestration layer** that delegates all engineering decisions to an AI coding agent. Brad uses an **adapter pattern** to abstract all external integrations, making it straightforward to swap ticketing systems, code repositories, CI/CD providers, observability tools, and LLM backends.
 
-- Monitor JIRA for issues labeled "BradReview"
-- Download attachments and prepare git repository state
-- Invoke the AI agent with complete context
-- Update JIRA based on outcomes
-- Monitor CI/CD pipelines
+### Adapter Architecture
 
-**The AI agent does all the thinking:**
-- Analyzes requirements for completeness
-- Proposes test scenarios
-- Implements code and tests
-- Fixes CI/CD failures
-- Makes all engineering decisions
+| Layer | Abstract Interface | Current Implementation |
+|---|---|---|
+| **Ticketing** | `TicketingAdapter` | Jira |
+| **Code Repository** | `CodeRepositoryAdapter` | GitHub |
+| **CI/CD** | `CICDAdapter` | GitHub Actions |
+| **Observability** | `ObservabilityAdapter` | Azure AKS |
+| **LLM** | `LLMAdapter` | Azure OpenAI Responses API |
+
+### Project Structure
+
+```
+brad.py                          # CLI entry point
+brad_gui.py                      # Web GUI entry point
+brad/                            # Main package
+├── orchestrator.py              # Core workflow engine
+├── config.py                    # Configuration management
+├── db.py                        # SQLite persistence (history, costs)
+├── logging_config.py
+├── repo_manager.py              # Git operations (standalone)
+├── adapters/                    # Adapter layer
+│   ├── ticketing/               # e.g. Jira
+│   ├── code_repository/         # e.g. GitHub
+│   ├── ci_cd/                   # e.g. GitHub Actions
+│   ├── observability/           # e.g. Azure AKS
+│   └── llm/                     # e.g. Azure OpenAI
+├── agents/                      # Prompt building & response parsing
+│   └── interface.py
+└── gui/                         # Flask read-only dashboard
+    ├── app.py
+    ├── static/
+    └── templates/
+tests/                           # Unit tests
+```
 
 ## Prerequisites
 
 1. **Python 3.12+**
-2. **Azure OpenAI** - An Azure OpenAI resource with a deployed model (e.g. `gpt-5.2-codex`)
-3. **Git** - For repository operations
+2. **Azure OpenAI** resource with a deployed model
+3. **Git**
 4. **JIRA Account** with API access
 5. **GitHub Account** with API access
-6. **Target Repository** - The repository Brad will work on
+6. **Target Repository** — the repository Brad will work on
 
 ## Installation
-
-### 1. Clone Brad Repository
 
 ```bash
 git clone <brad-repo-url>
 cd brad
-```
-
-### 2. Create Virtual Environment
-
-```bash
 python -m venv .venv
-```
-
-### 3. Activate Virtual Environment
-
-**Windows (PowerShell):**
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-**Windows (Git Bash):**
-```bash
-source .venv/Scripts/activate
-```
-
-**Linux/macOS:**
-```bash
-source .venv/bin/activate
-```
-
-### 4. Install Dependencies
-
-```bash
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux/macOS
 pip install -r requirements.txt
 ```
 
-### 5. **REQUIRED:** Clone and Set Up the Target Repository (flaerobotics/bea)
-
-**This step is mandatory.** Brad works on a target repository that must be cloned and properly configured:
-
-1. Clone the flaerobotics/bea repository:
-```bash
-git clone https://github.com/flaerobotics/bea.git /path/to/your/bea
-cd /path/to/your/bea
-```
-
-2. Set up the repository environment:
-```bash
-# Create and activate virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies using uv
-uv sync
-```
-
-3. **Note:** The AI agent will execute commands and make changes in this directory.
-   This path will be specified as `TARGET_REPO_PATH` in your `.env` configuration (see Configuration section below).
-
 ## Configuration
 
-Create a `.env` file or set environment variables:
+Copy `.env.example` to `.env` and fill in your values. See `.env.example` for all options.
 
-### Required Variables
+**Required:**
+- `JIRA_URL`, `JIRA_USER`, `JIRA_TOKEN`
+- `GITHUB_TOKEN`, `GITHUB_REPO`
+- `TARGET_REPO_PATH` — absolute path to the repo Brad works on
+- `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL`
 
-```bash
-# JIRA Configuration
-JIRA_URL=https://your-company.atlassian.net
-JIRA_USER=your-email@company.com
-JIRA_TOKEN=your-jira-api-token
-
-# GitHub Configuration
-GITHUB_TOKEN=your-github-token
-GITHUB_REPO=flaerobotics/bea
-
-# Target Repository (absolute path to the cloned flaerobotics/bea repo from step 5)
-TARGET_REPO_PATH=C:\git\bea
-
-# Azure OpenAI Configuration
-AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/openai/deployments/<deployment>/responses?api-version=2025-03-01-preview
-AZURE_OPENAI_API_KEY=your-api-key
-AZURE_OPENAI_MODEL=gpt-5.2-codex
-```
-
-### Optional Variables
-
-```bash
-# JIRA Project Key (default: DEV)
-JIRA_PROJECT_KEY=DEV
-
-# Safety Limits
-MAX_CLARIFICATION_CYCLES=3
-MAX_CI_FIX_ITERATIONS=5
-MAX_REVIEW_FIX_ITERATIONS=3  # Max iterations to address PR review comments
-MAX_FLAKY_RETRIES=1
-CI_POLL_INTERVAL=60
-
-# Logging
-LOG_LEVEL=INFO
-ATTACHMENTS_DIR=./attachments
-```
-
-### Getting API Tokens
-
-**JIRA API Token:**
-1. Go to https://id.atlassian.com/manage-profile/security/api-tokens
-2. Create new token
-3. Copy the token
-
-**GitHub Token:**
-1. Go to https://github.com/settings/tokens
-2. Generate new token (classic)
-3. Required scopes: `repo`, `workflow`
-4. Copy the token
+**Optional (cost tracking):**
+- `LLM_COST_PER_1K_PROMPT_TOKENS`, `LLM_COST_PER_1K_COMPLETION_TOKENS`
 
 ## Usage
 
-### Process Issues Once
+### Run Brad (process issues once)
 
 ```bash
 python brad.py run --once
 ```
 
-### Enable Debug Logging
+### Start Web GUI
+
+```bash
+;;
+```
+
+The GUI shows execution history, per-ticket cost breakdowns, CI/CD status, and real-time backend status.
+
+### Debug Logging
 
 ```bash
 python brad.py run --once --log-level DEBUG
 ```
 
-### Check Logs
-
-Logs are written to `logs/brad_<timestamp>.log`
-
-```bash
-tail -f logs/brad_*.log
-```
-
 ## Workflow
 
-### 1. PM Creates JIRA Issue
-
-- Create issue with clear description
-- Add attachments (mockups, diagrams, logs, etc.)
-- Add label: **BradReview**
-
-### 2. Brad Analyzes Requirements
-
-Brad removes the label immediately and analyzes the requirements. Brad may:
-
-- **Request clarification** if requirements are incomplete
-- **Propose test scenarios** for PM approval
-- **Proceed to implementation** if everything is clear
-
-PM must:
-- Update the description based on feedback
-- Re-add **BradReview** label to continue
-
-### 3. Brad Implements
-
-Brad:
-- Creates feature branch (name = JIRA issue key, e.g., DEV-1234)
-- Implements code and tests
-- Commits and pushes changes
-- Creates pull request
-
-### 4. Brad Monitors CI/CD
-
-Brad waits for CI/CD to complete. If CI fails, Brad:
-- Analyzes failure logs
-- Fixes the issues
-- Pushes fixes (CI re-runs automatically)
-- Repeats up to 5 times
-
-### 5. Brad Completes
-
-When CI passes, Brad:
-- Sets JIRA status to **REVIEW**
-- Posts comment: "Brad is done. ✅"
+1. **PM creates JIRA issue** with description + attachments, adds label `BradReview`
+2. **Brad analyzes requirements** — may request clarification or propose test scenarios
+3. **Brad implements** — creates feature branch, writes code + tests, opens PR
+4. **Brad monitors CI/CD** — fixes failures (up to 5 attempts), addresses review comments
+5. **Brad completes** — sets JIRA status to REVIEW, posts "Brad is done."
 
 ## Safety Features
 
-- **Maximum clarification cycles:** 3 per issue
-- **Maximum CI fix iterations:** 5 per issue
-- **Agent iteration limit:** 200 iterations per AI agent invocation
-- **No scope changes** - Brad never modifies requirements
-- **No auto-merge** - All PRs require human review
+- **Max clarification cycles:** 3 per issue
+- **Max CI fix iterations:** 5 per issue
+- **Max review fix iterations:** 3 per issue
+- **Agent iteration limit:** 200 per LLM invocation
+- **No scope changes** — Brad never modifies requirements
+- **No auto-merge** — all PRs require human review
 
 ## Testing
 
-### Run Unit Tests
-
 ```bash
-pytest tests/
+pytest tests/ -v
+pytest tests/ --cov=brad --cov-report=html
 ```
 
-### Run with Coverage
+## Contributing
 
-```bash
-pytest tests/ --cov=. --cov-report=html
-```
-
-### Run Specific Test
-
-```bash
-pytest tests/test_config.py -v
-```
-
-## Development
-
-### Code Style
-
-```bash
-# Format code
-black .
-
-# Lint
-flake8 .
-
-# Type checking
-mypy .
-```
-
-### Adding New Features
-
-1. Update specification in `AI Software Engineer.md`
-2. Implement changes
-3. Add unit tests
-4. Update README
-
-## Troubleshooting
-
-### Brad is stuck
-
-Check the log file for details:
-```bash
-cat logs/brad_*.log | grep ERROR
-```
-
-Common issues:
-- Invalid JIRA workflow transitions
-- GitHub API rate limits
-- Azure OpenAI rate limiting (auto-retried with exponential backoff)
-- Git conflicts
-
-### JIRA API errors
-
-Verify credentials:
-```bash
-curl -u your-email@company.com:your-token https://your-company.atlassian.net/rest/api/3/myself
-```
-
-### GitHub API errors
-
-Verify token:
-```bash
-curl -H "Authorization: token your-token" https://api.github.com/user
-```
-
-## Architecture Details
-
-See `AI Software Engineer.md` for complete specification.
-
-**Key Components:**
-- `brad.py` - Main entry point
-- `brad_orchestrator.py` - State machine and workflow logic
-- `coding_agent.py` - Azure OpenAI Responses API agent with tool-calling
-- `ai_agent_interface.py` - Prompt building and response parsing
-- `jira_client.py` - JIRA API client
-- `github_client.py` - GitHub API client
-- `ci_analyzer.py` - CI/CD monitoring
-- `repo_manager.py` - Git operations
-- `phase_cache.py` - Requirements analysis caching
-- `test_selector.py` - Smart test selection from changed files
-- `config.py` - Configuration management
-- `logging_config.py` - Logging setup
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add new adapters and extend Brad.
 
 ## License
 
-[Your License Here]
-
-## Support
-
-For issues or questions, contact: [Your Contact Info]
+[MIT](LICENSE)

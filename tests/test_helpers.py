@@ -1,5 +1,5 @@
 """Shared test helpers for creating Config objects with all required fields."""
-from config import Config
+from brad.config import Config
 
 
 def make_test_config(tmp_path, **overrides):
@@ -14,7 +14,7 @@ def make_test_config(tmp_path, **overrides):
         target_repo_path=str(tmp_path),
         azure_openai_endpoint="https://test.openai.azure.com/openai/responses?api-version=2025-04-01-preview",
         azure_openai_api_key="test-key",
-        azure_openai_model="gpt-5.2-codex",
+        azure_openai_model="gpt-4o",
         max_clarification_cycles=3,
         max_ci_fix_iterations=5,
         max_review_fix_iterations=3,
@@ -22,10 +22,13 @@ def make_test_config(tmp_path, **overrides):
         ci_poll_interval=60,
         azure_credentials_json="",
         azure_resource_group="TEST",
-        azure_aks_cluster="bea-test2",
+        azure_aks_cluster="test-cluster",
         deployment_health_check=True,
         deployment_log_tail_lines=200,
         deployment_log_since="10m",
+        llm_cost_per_1k_prompt_tokens=0.005,
+        llm_cost_per_1k_completion_tokens=0.015,
+        db_path=str(tmp_path / "test_brad.db"),
         log_level="INFO",
         attachments_dir=str(tmp_path / "attachments"),
     )

@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from codebase_map import (
+from brad.codebase_map import (
     _extract_python_symbols,
     _build_tree,
     _format_map,
@@ -17,8 +17,8 @@ from codebase_map import (
 @pytest.fixture
 def sample_repo(tmp_path):
     """Create a minimal repo structure for testing."""
-    # src/bea/modules/text_agent/core.py
-    mod_dir = tmp_path / "src" / "bea" / "modules" / "text_agent"
+    # src/app/modules/text_agent/core.py
+    mod_dir = tmp_path / "src" / "app" / "modules" / "text_agent"
     mod_dir.mkdir(parents=True)
     (mod_dir / "core.py").write_text(
         "class TextAgent:\n"
@@ -29,8 +29,8 @@ def sample_repo(tmp_path):
     )
     (mod_dir / "__init__.py").write_text("")
 
-    # src/bea/base/services/messages.py
-    svc_dir = tmp_path / "src" / "bea" / "base" / "services"
+    # src/app/base/services/messages.py
+    svc_dir = tmp_path / "src" / "app" / "base" / "services"
     svc_dir.mkdir(parents=True)
     (svc_dir / "messages.py").write_text(
         "class MessageService:\n"
@@ -52,13 +52,13 @@ def sample_repo(tmp_path):
 
 class TestExtractPythonSymbols:
     def test_extracts_classes_and_functions(self, sample_repo):
-        fp = sample_repo / "src" / "bea" / "modules" / "text_agent" / "core.py"
+        fp = sample_repo / "src" / "app" / "modules" / "text_agent" / "core.py"
         symbols = _extract_python_symbols(fp)
         assert any("class TextAgent" in s for s in symbols)
         assert any("def create_agent" in s for s in symbols)
 
     def test_skips_private_methods(self, sample_repo):
-        fp = sample_repo / "src" / "bea" / "modules" / "text_agent" / "core.py"
+        fp = sample_repo / "src" / "app" / "modules" / "text_agent" / "core.py"
         symbols = _extract_python_symbols(fp)
         joined = " ".join(symbols)
         assert "_internal" not in joined
@@ -74,8 +74,8 @@ class TestBuildTree:
     def test_finds_directories(self, sample_repo):
         data = _build_tree(str(sample_repo))
         tree_str = "\n".join(data["tree"])
-        assert "src/bea/modules/text_agent" in tree_str
-        assert "src/bea/base/services" in tree_str
+        assert "src/app/modules/text_agent" in tree_str
+        assert "src/app/base/services" in tree_str
 
     def test_finds_symbols(self, sample_repo):
         data = _build_tree(str(sample_repo))
@@ -104,7 +104,7 @@ class TestFormatMap:
 
 class TestGetCodebaseMap:
     def test_generates_and_caches(self, sample_repo, tmp_path, monkeypatch):
-        monkeypatch.setattr("codebase_map.CACHE_DIR", tmp_path / ".cache")
+        monkeypatch.setattr("brad.codebase_map.CACHE_DIR", tmp_path / ".cache")
         text = get_codebase_map(str(sample_repo), main_commit="abc123")
         assert "CODEBASE MAP" in text
         # Second call should hit cache
@@ -112,7 +112,7 @@ class TestGetCodebaseMap:
         assert text2 == text
 
     def test_new_commit_regenerates(self, sample_repo, tmp_path, monkeypatch):
-        monkeypatch.setattr("codebase_map.CACHE_DIR", tmp_path / ".cache")
+        monkeypatch.setattr("brad.codebase_map.CACHE_DIR", tmp_path / ".cache")
         text1 = get_codebase_map(str(sample_repo), main_commit="aaa")
         text2 = get_codebase_map(str(sample_repo), main_commit="bbb")
         # Both should be valid maps

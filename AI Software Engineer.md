@@ -482,7 +482,7 @@ all-purpose !
 
 Brad is:
 
-- Purpose-built for BE - A 
+- Purpose-built for a specific target repository
      (the sole repository on which Brad will
     operate)
 

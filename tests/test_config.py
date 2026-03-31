@@ -1,7 +1,7 @@
 import pytest
 import os
 from pathlib import Path
-from config import load_config, validate_config, Config
+from brad.config import load_config, validate_config, Config
 from test_helpers import make_test_config
 
 
@@ -22,7 +22,7 @@ def test_load_config_with_required_vars(monkeypatch):
     assert cfg.github_token == "gh-token"
     assert cfg.github_repo == "owner/repo"
     assert cfg.target_repo_path == "/fake/repo"
-    assert cfg.azure_openai_model == "gpt-5.2-codex"  # default
+    assert cfg.azure_openai_model == "gpt-4o"  # default
 
 
 def test_load_config_with_defaults(monkeypatch):
@@ -44,8 +44,8 @@ def test_load_config_with_defaults(monkeypatch):
     assert cfg.log_level == "INFO"
     # Azure defaults
     assert cfg.azure_credentials_json == ""
-    assert cfg.azure_resource_group == "TEST"
-    assert cfg.azure_aks_cluster == "bea-test2"
+    assert cfg.azure_resource_group == ""
+    assert cfg.azure_aks_cluster == ""
     assert cfg.deployment_health_check is True
     assert cfg.deployment_log_tail_lines == 200
     assert cfg.deployment_log_since == "10m"

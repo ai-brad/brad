@@ -5,13 +5,13 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from phase_cache import _make_key, get_cached_phase, set_cached_phase, CACHE_DIR
+from brad.phase_cache import _make_key, get_cached_phase, set_cached_phase, CACHE_DIR
 
 
 @pytest.fixture(autouse=True)
 def clean_cache(tmp_path, monkeypatch):
     """Redirect CACHE_DIR to a temp directory for each test."""
-    monkeypatch.setattr("phase_cache.CACHE_DIR", tmp_path / ".brad_cache")
+    monkeypatch.setattr("brad.phase_cache.CACHE_DIR", tmp_path / ".brad_cache")
     yield
 
 

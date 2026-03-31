@@ -25,6 +25,11 @@ attachments/
 # Brad phase cache
 .brad_cache/
 
+# Brad database
+brad_data.db
+*.sqlite
+*.sqlite3
+
 # Environment
 .env
 

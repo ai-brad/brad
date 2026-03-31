@@ -2,8 +2,8 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
 import subprocess
-from repo_manager import RepoManager
-from config import Config
+from brad.repo_manager import RepoManager
+from brad.config import Config
 from test_helpers import make_test_config
 
 

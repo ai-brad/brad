@@ -1,7 +1,7 @@
 """Tests for test_selector module."""
 
 import pytest
-from test_selector import (
+from brad.test_selector import (
     map_source_to_test_dirs,
     extract_failed_tests_from_ci_logs,
 )
@@ -9,22 +9,22 @@ from test_selector import (
 
 class TestMapSourceToTestDirs:
     def test_module_source_maps_to_test_dir(self):
-        changed = ["src/bea/modules/text_agent/text_agent_preprocessor.py"]
+        changed = ["src/app/modules/text_agent/text_agent_preprocessor.py"]
         result = map_source_to_test_dirs(changed)
         assert "tests/unit/modules/text_agent" in result
 
     def test_base_source_maps_to_test_dir(self):
-        changed = ["src/bea/base/services/messages.py"]
+        changed = ["src/app/base/services/messages.py"]
         result = map_source_to_test_dirs(changed)
         assert "tests/unit/base/services" in result
 
     def test_common_source_maps_to_test_dir(self):
-        changed = ["src/bea/common/system_tags.py"]
+        changed = ["src/app/common/system_tags.py"]
         result = map_source_to_test_dirs(changed)
         assert "tests/unit/common" in result
 
     def test_non_python_files_ignored(self):
-        changed = ["README.md", "package.json", "src/bea/modules/text_agent/foo.txt"]
+        changed = ["README.md", "package.json", "src/app/modules/text_agent/foo.txt"]
         result = map_source_to_test_dirs(changed)
         assert result == []
 
@@ -35,17 +35,17 @@ class TestMapSourceToTestDirs:
 
     def test_deduplication(self):
         changed = [
-            "src/bea/modules/text_agent/a.py",
-            "src/bea/modules/text_agent/b.py",
-            "src/bea/modules/text_agent/sub/c.py",
+            "src/app/modules/text_agent/a.py",
+            "src/app/modules/text_agent/b.py",
+            "src/app/modules/text_agent/sub/c.py",
         ]
         result = map_source_to_test_dirs(changed)
         assert result.count("tests/unit/modules/text_agent") == 1
 
     def test_multiple_modules(self):
         changed = [
-            "src/bea/modules/text_agent/foo.py",
-            "src/bea/base/services/bar.py",
+            "src/app/modules/text_agent/foo.py",
+            "src/app/base/services/bar.py",
         ]
         result = map_source_to_test_dirs(changed)
         assert "tests/unit/modules/text_agent" in result

@@ -1,0 +1,393 @@
+/* Brad GUI — Color: #156082 */
+:root {
+    --brad-primary: #156082;
+    --brad-primary-light: #1a7ba5;
+    --brad-primary-dark: #0f4a63;
+    --brad-bg: #f5f7fa;
+    --brad-card: #ffffff;
+    --brad-text: #2d3748;
+    --brad-text-muted: #718096;
+    --brad-border: #e2e8f0;
+    --brad-success: #38a169;
+    --brad-error: #e53e3e;
+    --brad-warning: #d69e2e;
+    --brad-running: #3182ce;
+    --brad-merged: #6f42c1;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--brad-bg);
+    color: var(--brad-text);
+    line-height: 1.6;
+}
+
+/* ==================== Loading overlay ==================== */
+.loading-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(135deg, var(--brad-primary-dark) 0%, var(--brad-primary) 50%, var(--brad-primary-light) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    transition: opacity 0.5s ease;
+}
+
+.loading-overlay.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.loading-content {
+    text-align: center;
+    color: white;
+}
+
+.loading-logo {
+    width: 100px;
+    animation: logo-pulse 1.5s ease-in-out infinite;
+    margin-bottom: 1.5rem;
+    filter: brightness(0) invert(1);
+}
+
+@keyframes logo-pulse {
+    0%, 100% { transform: scale(1); opacity: 0.9; }
+    50% { transform: scale(1.1); opacity: 1; }
+}
+
+.loading-bar {
+    width: 200px;
+    height: 4px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 2px;
+    margin: 0 auto 1rem;
+    overflow: hidden;
+}
+
+.loading-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: white;
+    border-radius: 2px;
+    animation: load-fill 2.5s ease-out forwards;
+}
+
+@keyframes load-fill {
+    0% { width: 0%; }
+    60% { width: 70%; }
+    100% { width: 100%; }
+}
+
+.loading-text {
+    font-size: 0.9rem;
+    opacity: 0.8;
+    letter-spacing: 0.05em;
+}
+
+/* ==================== Header ==================== */
+.header {
+    background: var(--brad-primary);
+    color: white;
+    padding: 0.75rem 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.header-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    text-decoration: none;
+    color: white;
+}
+
+.header-brand:hover { text-decoration: none; opacity: 0.9; }
+
+.header .header-logo {
+    height: 36px;
+    width: 36px;
+}
+
+.header h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: white;
+}
+
+.header nav {
+    margin-left: auto;
+    display: flex;
+    gap: 1.5rem;
+}
+
+.header nav a {
+    color: rgba(255,255,255,0.85);
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: color 0.2s;
+}
+
+.header nav a:hover, .header nav a.active {
+    color: white;
+}
+
+/* ==================== Main content ==================== */
+.container {
+    max-width: 1200px;
+    margin: 2rem auto;
+    padding: 0 1.5rem;
+}
+
+/* ==================== Cards ==================== */
+.card {
+    background: var(--brad-card);
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    border: 1px solid var(--brad-border);
+}
+
+.card h2 {
+    font-size: 1.1rem;
+    color: var(--brad-primary);
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--brad-primary);
+}
+
+.card h3 {
+    font-size: 0.95rem;
+    color: var(--brad-text);
+}
+
+/* ==================== Status badges ==================== */
+.badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.badge-running { background: #ebf8ff; color: var(--brad-running); }
+.badge-completed { background: #f0fff4; color: var(--brad-success); }
+.badge-error { background: #fff5f5; color: var(--brad-error); }
+.badge-stuck { background: #fffff0; color: var(--brad-warning); }
+.badge-merged { background: #f5f0ff; color: var(--brad-merged); }
+
+/* ==================== Status indicator ==================== */
+.status-box {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+
+.status-box.idle {
+    background: #f0fff4;
+    border: 1px solid #c6f6d5;
+}
+
+.status-box.active {
+    background: #ebf8ff;
+    border: 1px solid #bee3f8;
+}
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.status-dot.idle { background: var(--brad-success); }
+.status-dot.active { background: var(--brad-running); animation: pulse 1.5s infinite; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* ==================== Stats grid ==================== */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.stat-card {
+    background: var(--brad-card);
+    border: 1px solid var(--brad-border);
+    border-radius: 8px;
+    padding: 1rem;
+    text-align: center;
+}
+
+.stat-card .stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--brad-primary);
+}
+
+.stat-card .stat-label {
+    font-size: 0.8rem;
+    color: var(--brad-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* ==================== Table ==================== */
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th {
+    text-align: left;
+    padding: 0.75rem;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    color: var(--brad-text-muted);
+    border-bottom: 2px solid var(--brad-border);
+    letter-spacing: 0.05em;
+}
+
+td {
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--brad-border);
+    font-size: 0.9rem;
+}
+
+tr:hover { background: #f7fafc; }
+
+a {
+    color: var(--brad-primary);
+    text-decoration: none;
+}
+
+a:hover { text-decoration: underline; }
+
+.issue-link {
+    font-weight: 600;
+}
+
+/* ==================== Cost highlight ==================== */
+.cost {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-weight: 600;
+    color: var(--brad-primary-dark);
+}
+
+/* ==================== Detail meta ==================== */
+.detail-meta {
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+/* ==================== Error box ==================== */
+.error-box {
+    background: #fff5f5;
+    border: 1px solid #feb2b2;
+    border-radius: 6px;
+    padding: 1rem;
+    margin-top: 1rem;
+}
+
+/* ==================== Step summary ==================== */
+.step-summary {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--brad-text-muted);
+    max-height: 150px;
+    overflow-y: auto;
+}
+
+.step-summary pre {
+    white-space: pre-wrap;
+}
+
+/* ==================== Loading placeholder ==================== */
+.loading-placeholder {
+    color: var(--brad-text-muted);
+    font-style: italic;
+    padding: 1rem 0;
+}
+
+/* ==================== Steps timeline ==================== */
+.timeline {
+    position: relative;
+    padding-left: 2rem;
+}
+
+.timeline::before {
+    content: '';
+    position: absolute;
+    left: 0.5rem;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--brad-border);
+}
+
+.timeline-item {
+    position: relative;
+    padding-bottom: 1.5rem;
+}
+
+.timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -1.65rem;
+    top: 0.3rem;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--brad-primary);
+    border: 2px solid white;
+    box-shadow: 0 0 0 2px var(--brad-primary);
+}
+
+.timeline-item.error::before { background: var(--brad-error); box-shadow: 0 0 0 2px var(--brad-error); }
+.timeline-item.stuck::before { background: var(--brad-warning); box-shadow: 0 0 0 2px var(--brad-warning); }
+.timeline-item.running::before { background: var(--brad-running); box-shadow: 0 0 0 2px var(--brad-running); animation: pulse 1.5s infinite; }
+
+.timeline-item h3 {
+    font-size: 0.95rem;
+    margin-bottom: 0.25rem;
+}
+
+.timeline-meta {
+    font-size: 0.8rem;
+    color: var(--brad-text-muted);
+}
+
+/* ==================== Empty state ==================== */
+.empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: var(--brad-text-muted);
+}
+
+.empty-state p {
+    font-size: 1.1rem;
+}
+
+/* ==================== Responsive ==================== */
+@media (max-width: 768px) {
+    .header { padding: 0.75rem 1rem; }
+    .container { padding: 0 1rem; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .detail-meta { gap: 1rem; }
+}

@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+{% block content %}
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value" id="h-stat-executions">{{ totals.total_executions or 0 }}</div>
+        <div class="stat-label">Total Executions</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="h-stat-tokens">{{ "{:,}".format((totals.total_prompt_tokens or 0) + (totals.total_completion_tokens or 0)) }}</div>
+        <div class="stat-label">Total Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value cost" id="h-stat-cost">${{ "%.2f"|format(totals.total_cost or 0) }}</div>
+        <div class="stat-label">Total Cost</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>All Executions</h2>
+    {% if executions %}
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Issue</th>
+                <th>Summary</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Finished</th>
+                <th>PR</th>
+                <th>Tokens</th>
+                <th>Cost</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="history-tbody">
+        {% for ex in executions %}
+            <tr>
+                <td>{{ ex.id }}</td>
+                <td><a href="{{ jira_url }}/browse/{{ ex.issue_key }}" target="_blank" class="issue-link"><strong>{{ ex.issue_key }}</strong></a></td>
+                <td>{{ ex.summary[:50] }}{% if ex.summary|length > 50 %}…{% endif %}</td>
+                <td>
+                    <span class="badge badge-{{ ex.status }}">{{ ex.status }}</span>
+                </td>
+                <td><span data-utc="{{ ex.started_at }}">{{ ex.started_at[:16] }}</span></td>
+                <td><span data-utc="{{ ex.finished_at }}">{{ ex.finished_at[:16] if ex.finished_at else '—' }}</span></td>
+                <td>
+                    {% if ex.pr_url %}
+                    <a href="{{ ex.pr_url }}" target="_blank">PR #{{ ex.pr_number }}</a>
+                    {% else %}—{% endif %}
+                </td>
+                <td>{{ "{:,}".format((ex.total_prompt_tokens or 0) + (ex.total_completion_tokens or 0)) }}</td>
+                <td class="cost">${{ "%.4f"|format(ex.total_cost or 0) }}</td>
+                <td><a href="/execution/{{ ex.id }}">Details →</a></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <p>No execution history yet.</p>
+    </div>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+var JIRA_URL = {{ jira_url|tojson }};
+
+function fmtNum(n) { return (n || 0).toLocaleString(); }
+function fmtCost(n) { return '$' + (n || 0).toFixed(2); }
+function fmtCost4(n) { return '$' + (n || 0).toFixed(4); }
+function truncate(s, n) { return s && s.length > n ? s.substring(0, n) + '…' : (s || ''); }
+
+function badgeClass(status) {
+    if (status === 'completed') return 'badge-completed';
+    if (status === 'running') return 'badge-running';
+    if (status === 'error') return 'badge-error';
+    if (status === 'stuck') return 'badge-stuck';
+    return 'badge-running';
+}
+
+function refreshHistory() {
+    fetch('/api/executions')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('h-stat-executions').textContent = fmtNum(data.totals.total_executions);
+            document.getElementById('h-stat-tokens').textContent = fmtNum((data.totals.total_prompt_tokens || 0) + (data.totals.total_completion_tokens || 0));
+            document.getElementById('h-stat-cost').textContent = fmtCost(data.totals.total_cost);
+
+            var tbody = document.getElementById('history-tbody');
+            if (!tbody || !data.executions) return;
+            var html = '';
+            data.executions.forEach(function(ex) {
+                var prCell = ex.pr_url
+                    ? '<a href="' + ex.pr_url + '" target="_blank">PR #' + ex.pr_number + '</a>'
+                    : '—';
+                var tokens = (ex.total_prompt_tokens || 0) + (ex.total_completion_tokens || 0);
+                html += '<tr>' +
+                    '<td>' + ex.id + '</td>' +
+                    '<td><a href="' + JIRA_URL + '/browse/' + ex.issue_key + '" target="_blank" class="issue-link"><strong>' + ex.issue_key + '</strong></a></td>' +
+                    '<td>' + truncate(ex.summary, 50) + '</td>' +
+                    '<td><span class="badge ' + badgeClass(ex.status) + '">' + ex.status + '</span></td>' +
+                    '<td>' + fmtLocalTime(ex.started_at) + '</td>' +
+                    '<td>' + fmtLocalTime(ex.finished_at) + '</td>' +
+                    '<td>' + prCell + '</td>' +
+                    '<td>' + tokens.toLocaleString() + '</td>' +
+                    '<td class="cost">' + fmtCost4(ex.total_cost) + '</td>' +
+                    '<td><a href="/execution/' + ex.id + '">Details →</a></td>' +
+                    '</tr>';
+            });
+            tbody.innerHTML = html;
+        })
+        .catch(function(e) { console.error('Poll error:', e); });
+}
+
+setInterval(refreshHistory, 5000);
+</script>
+{% endblock %}

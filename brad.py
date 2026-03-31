@@ -7,9 +7,10 @@ Main entry point for the Brad orchestrator.
 import sys
 import argparse
 from dotenv import load_dotenv
-from config import load_config, validate_config
-from logging_config import setup_logging, get_logger
-from brad_orchestrator import BradOrchestrator
+from brad.config import load_config, validate_config
+from brad.logging_config import setup_logging, get_logger
+from brad.orchestrator import BradOrchestrator
+from brad import db
 
 
 def main():
@@ -23,70 +24,74 @@ Examples:
   python brad.py --log-level DEBUG   # Enable debug logging
         """
     )
-    
+
     parser.add_argument(
         "command",
         choices=["run"],
         help="Command to execute"
     )
-    
+
     parser.add_argument(
         "--once",
         action="store_true",
         help="Run once and exit"
     )
-    
+
     parser.add_argument(
         "--loop",
         action="store_true",
         help="Run continuously (not yet implemented)"
     )
-    
+
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override log level from config"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Load .env file
     load_dotenv()
-    
+
     # Load configuration
     try:
         cfg = load_config()
-        
+
         # Override log level if specified
         if args.log_level:
             cfg.log_level = args.log_level
-        
+
         # Setup logging
         log_file = setup_logging(log_level=cfg.log_level)
         logger = get_logger(__name__)
-        
+
         logger.info("Brad starting up")
         logger.info(f"Log file: {log_file}")
         logger.info(f"Target repository: {cfg.target_repo_path}")
         logger.info(f"JIRA URL: {cfg.jira_url}")
         logger.info(f"GitHub repo: {cfg.github_repo}")
-        
+
         # Validate configuration
         validate_config(cfg)
         logger.info("Configuration validated")
-        
+
+        # Initialize database
+        db.init_db(cfg.db_path)
+        logger.info(f"Database initialized at {cfg.db_path}")
+
     except Exception as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Initialize orchestrator
     try:
-        brad = BradOrchestrator(cfg)
+        orchestrator = BradOrchestrator(cfg)
     except Exception as e:
         logger = get_logger(__name__)
         logger.error(f"Failed to initialize Brad: {e}", exc_info=True)
         sys.exit(1)
-    
+
     # Execute command
     try:
         if args.command == "run":
@@ -94,10 +99,10 @@ Examples:
                 logger.error("Loop mode not yet implemented")
                 sys.exit(1)
             else:
-                brad.run_once()
-        
+                orchestrator.run_once()
+
         logger.info("Brad completed successfully")
-        
+
     except KeyboardInterrupt:
         logger.info("Brad interrupted by user")
         sys.exit(0)

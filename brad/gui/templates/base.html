@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brad — {% block title %}Dashboard{% endblock %}</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    {% block loading_overlay %}{% endblock %}
+
+    <header class="header">
+        <a href="/" class="header-brand">
+            <img src="{{ url_for('static', filename='bradlogo.png') }}" alt="Brad" class="header-logo">
+            <h1>Brad</h1>
+        </a>
+        <nav>
+            <a href="/" class="{% if request.path == '/' %}active{% endif %}">Dashboard</a>
+            <a href="/history" class="{% if request.path == '/history' %}active{% endif %}">History</a>
+        </nav>
+    </header>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+        // Localize all timestamps on page
+        function localizeTimestamps() {
+            document.querySelectorAll('[data-utc]').forEach(function(el) {
+                var utc = el.getAttribute('data-utc');
+                if (!utc) return;
+                try {
+                    var d = new Date(utc);
+                    if (isNaN(d.getTime())) return;
+                    el.textContent = d.toLocaleString();
+                } catch(e) {}
+            });
+        }
+        localizeTimestamps();
+
+        function fmtLocalTime(isoStr) {
+            if (!isoStr) return '—';
+            try {
+                var d = new Date(isoStr);
+                if (isNaN(d.getTime())) return isoStr;
+                return d.toLocaleString();
+            } catch(e) { return isoStr; }
+        }
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
