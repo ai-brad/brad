@@ -10,7 +10,7 @@ import re
 from typing import Dict, List, Optional
 from pathlib import Path
 from brad.logging_config import get_logger
-from brad.adapters.llm.base import LLMAdapter, LLMResult
+from brad.adapters.llm.base import LLMAdapter
 from brad.codebase_map import get_codebase_map
 
 
@@ -122,6 +122,25 @@ class AIAgentInterface:
         prompt = self._build_local_review_prompt(issue_key, description, diff, branch_name)
         result = self.llm.run(prompt, repo_path)
         parsed = self._parse_local_review_response(result.text)
+        parsed["_usage"] = result.usage
+        return parsed
+
+    def invoke_local_review_fix(
+        self,
+        issue_key: str,
+        description: str,
+        review_feedback: str,
+        repo_path: str,
+        branch_name: str,
+        iteration: int,
+        previous_response_id: Optional[str] = None,
+    ) -> Dict:
+        self.logger.info(f"Local review fix: {issue_key} on branch {branch_name} (iteration {iteration})")
+        prompt = self._build_local_review_fix_prompt(issue_key, description, review_feedback, branch_name, iteration)
+        codebase_map = get_codebase_map(repo_path)
+        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        parsed = self._parse_local_review_fix_response(result.text)
+        parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
         return parsed
 
@@ -313,6 +332,30 @@ After completing your action, respond with ONE of these:
 - "STUCK: <reason>" — if you cannot resolve this
 """
 
+    def _build_local_review_fix_prompt(self, issue_key, description, review_feedback, branch_name, iteration):
+        return f"""You are Brad, addressing local code review feedback for issue {issue_key}.
+
+Branch: {branch_name}
+Iteration: {iteration}
+
+Original Requirements:
+{description}
+
+Local Review Feedback:
+{review_feedback}
+
+MANDATORY STEPS:
+1. Read and understand the review feedback carefully
+2. Address the requested changes in code
+3. Run relevant tests to ensure nothing is broken
+4. Only after tests pass: Commit with message "{issue_key}: Address local review feedback - <summary>"
+5. Push changes: `git push origin {branch_name}`
+
+After addressing the feedback, respond with ONE of these:
+- "FIXED: <summary of what was changed>" — if you updated the code
+- "STUCK: <reason>" — if you cannot resolve the feedback
+"""
+
     def _build_local_review_prompt(self, issue_key, description, diff, branch_name):
         return f"""You are a senior code reviewer. Review the following changes for issue {issue_key}.
 
@@ -397,6 +440,16 @@ b) "CHANGES REQUESTED:" - if there are issues (list each with file path)
             self.logger.info("Detected: review fix completed")
             return {"action": "fixed", "message": output}
         self.logger.info("Detected: stuck on review fix")
+        return {"action": "stuck", "message": output}
+
+    def _parse_local_review_fix_response(self, output: str) -> Dict:
+        output_lower = output.lower()
+        if output.startswith("ERROR:"):
+            return {"action": "error", "message": output}
+        if any(kw in output_lower for kw in ['fixed', 'addressed', 'resolved', 'updated', 'tests pass']):
+            self.logger.info("Detected: local review fix completed")
+            return {"action": "fixed", "message": output}
+        self.logger.info("Detected: stuck on local review fix")
         return {"action": "stuck", "message": output}
 
     def _parse_code_review_reader_response(self, output: str) -> Dict:

@@ -20,7 +20,7 @@ from brad.agents.interface import AIAgentInterface
 from brad.repo_manager import RepoManager
 from brad.adf_parser import adf_to_text
 from brad.phase_cache import get_cached_phase, set_cached_phase
-from brad.test_selector import build_pytest_target, extract_failed_tests_from_ci_logs
+from brad.test_selector import extract_failed_tests_from_ci_logs
 from brad import db
 
 
@@ -39,6 +39,7 @@ class IssueState:
     clarification_count: int = 0
     ci_fix_count: int = 0
     review_fix_count: int = 0
+    local_review_fix_count: int = 0
 
 
 class BradOrchestrator:
@@ -360,9 +361,14 @@ class BradOrchestrator:
                     state.issue_key,
                     f"Brad has completed implementation and opened PR #{pr_number}:\n{pr_url}\n\nRunning local code review..."
                 )
-                review_passed = self._handle_local_review(state)
-                if review_passed:
+                review_result = self._handle_local_review(state)
+                if review_result.get("action") == "approved":
                     self.ticketing.comment(state.issue_key, "Local review passed. Monitoring CI/CD...")
+                    self._handle_ci_monitoring(state)
+                elif review_result.get("action") == "changes_requested":
+                    self._handle_local_review_fix(state, review_result.get("message", ""))
+                else:
+                    self.ticketing.comment(state.issue_key, "Local review could not be completed. Proceeding to CI/CD...")
                     self._handle_ci_monitoring(state)
             else:
                 self.ticketing.comment(state.issue_key, "Brad completed implementation but failed to create PR. Manual intervention needed.")
@@ -421,8 +427,8 @@ class BradOrchestrator:
             self.logger.error(f"{issue_key}: Exception creating PR: {e}")
             return None
 
-    def _handle_local_review(self, state: IssueState) -> bool:
-        """Run a fresh-context local review. Returns True if approved."""
+    def _handle_local_review(self, state: IssueState) -> Dict:
+        """Run a fresh-context local review and return its structured outcome."""
         self.logger.info(f"{state.issue_key}: Starting local code review")
         step_id = db.create_step(state.execution_id, "local_review")
         try:
@@ -434,7 +440,7 @@ class BradOrchestrator:
             diff = diff_result.stdout
             if not diff:
                 db.finish_step(step_id, status="completed", result_summary="No diff to review")
-                return True
+                return {"action": "approved", "message": "No diff to review"}
             if len(diff) > 80_000:
                 diff = diff[:80_000] + "\n... [diff truncated]"
 
@@ -455,34 +461,91 @@ class BradOrchestrator:
 
             if action == "approved":
                 self.ticketing.comment(state.issue_key, f"Local code review PASSED:\n\n{message}")
-                return True
-            else:
-                self.ticketing.comment(state.issue_key, f"Local code review found issues:\n\n{message}\n\nBrad will address these.")
-                return True  # Proceed anyway, log the feedback
+                return {"action": "approved", "message": message}
+
+            self.ticketing.comment(state.issue_key, f"Local code review found issues:\n\n{message}\n\nBrad will address these.")
+            return {"action": "changes_requested", "message": message}
         except Exception as e:
             self.logger.error(f"{state.issue_key}: Local review failed: {e}", exc_info=True)
             db.finish_step(step_id, status="error", result_summary=str(e)[:500])
+            return {"action": "error", "message": str(e)}
+
+    def _handle_local_review_fix(self, state: IssueState, review_feedback: str) -> bool:
+        """Address local review feedback and rerun local review before CI."""
+        if state.local_review_fix_count >= self.cfg.max_review_fix_iterations:
+            self.ticketing.comment(
+                state.issue_key,
+                f"Brad is stuck - could not address local review feedback after {state.local_review_fix_count} attempts."
+            )
+            return False
+
+        self.repo.checkout_branch(state.branch_name, create_if_missing=False)
+        self.repo._run_git("pull", "origin", state.branch_name)
+
+        response = self.agent.invoke_local_review_fix(
+            issue_key=state.issue_key, description=state.description,
+            review_feedback=review_feedback,
+            repo_path=str(self.repo.repo_path),
+            branch_name=state.branch_name,
+            iteration=state.local_review_fix_count,
+            previous_response_id=state.last_response_id,
+        )
+        state.last_response_id = response.get("_response_id")
+        self._record_step(state.execution_id, "local_review_fix", response)
+
+        action = response.get("action")
+        message = response.get("message", "")
+
+        if action == "fixed":
+            state.local_review_fix_count += 1
+            self.ticketing.comment(
+                state.issue_key,
+                f"Brad addressed local review feedback (attempt {state.local_review_fix_count}):\n\n{message}\n\nRe-running local review..."
+            )
+            review_result = self._handle_local_review(state)
+            if review_result.get("action") == "approved":
+                self.ticketing.comment(state.issue_key, "Local review passed. Monitoring CI/CD...")
+                self._handle_ci_monitoring(state)
+                return True
+            if review_result.get("action") == "changes_requested":
+                return self._handle_local_review_fix(state, review_result.get("message", ""))
+
+            self.ticketing.comment(state.issue_key, "Local review could not be completed after fixes. Proceeding to CI/CD...")
+            self._handle_ci_monitoring(state)
             return True
+        if action == "stuck":
+            self.ticketing.comment(
+                state.issue_key,
+                f"Brad is stuck - could not address local review feedback:\n\n{message}"
+            )
+            return False
+
+        self.ticketing.comment(
+            state.issue_key,
+            f"Brad encountered an error while addressing local review feedback:\n\n{message}\n\nBrad is stuck."
+        )
+        return False
 
     def _handle_ci_monitoring(self, state: IssueState):
         """Monitor CI/CD pipeline and check for review comments."""
-        if not state.pr_number:
+        pr_number = state.pr_number
+        if pr_number is None:
             self.logger.error(f"{state.issue_key}: Cannot monitor CI - no PR number")
             return
 
-        self.logger.info(f"{state.issue_key}: Monitoring CI for PR #{state.pr_number}")
+        self.logger.info(f"{state.issue_key}: Monitoring CI for PR #{pr_number}")
         step_id = db.create_step(state.execution_id, "ci_monitoring")
 
-        deploy_info = self.ci.resolve_deployment_env(pr_number=state.pr_number)
+        deploy_info = self.ci.resolve_deployment_env(pr_number=pr_number)
 
         ci_result = self.ci.wait_for_pr(
-            pr_number=state.pr_number,
+            pr_number=pr_number,
             poll_interval=self.cfg.ci_poll_interval,
             timeout=3600
         )
 
         if ci_result.success:
-            db.finish_step(step_id, status="completed", result_summary=f"CI passed for PR #{state.pr_number}")
+            db.finish_step(step_id, status="completed", result_summary=f"CI passed for PR #{pr_number}")
         else:
             db.finish_step(step_id, status="error", result_summary=f"CI failed: {', '.join(ci_result.failed_jobs)}"[:500])
 
@@ -492,7 +555,7 @@ class BradOrchestrator:
                 deployment_summary = self._check_deployment_after_ci(state, deploy_info)
 
             # Check for review comments (allow windsurf-bot, filter other bots)
-            all_review_comments = self.code_repo.fetch_review_comments(state.pr_number)
+            all_review_comments = self.code_repo.fetch_review_comments(pr_number)
             review_comments = []
             for c in all_review_comments:
                 user_login = c.get("user", {}).get("login", "")
@@ -561,8 +624,11 @@ class BradOrchestrator:
 
     def _fetch_detailed_ci_logs(self, state: IssueState, ci_result) -> str:
         """Fetch detailed job logs from CI for failed runs."""
+        pr_number = state.pr_number
+        if pr_number is None:
+            return ""
         try:
-            failed_run_ids = self.ci.get_failed_run_ids(state.pr_number)
+            failed_run_ids = self.ci.get_failed_run_ids(pr_number)
             if not failed_run_ids:
                 return ""
             all_logs = []
@@ -580,6 +646,11 @@ class BradOrchestrator:
 
     def _handle_ci_fix(self, state: IssueState, ci_result):
         """Handle CI failure by invoking AI agent to fix issues."""
+        pr_number = state.pr_number
+        if pr_number is None:
+            self.logger.error(f"{state.issue_key}: Cannot fix CI - no PR number")
+            return
+
         self.repo.checkout_branch(state.branch_name, create_if_missing=False)
         self.repo._run_git("pull", "origin", state.branch_name)
 
@@ -589,7 +660,7 @@ class BradOrchestrator:
             issue_key=state.issue_key, description=state.description,
             ci_logs=ci_result.logs, failed_jobs=ci_result.failed_jobs,
             repo_path=str(self.repo.repo_path),
-            branch_name=state.branch_name, pr_number=state.pr_number,
+            branch_name=state.branch_name, pr_number=pr_number,
             iteration=state.ci_fix_count,
             failed_test_target=failed_test_target,
             previous_response_id=state.last_response_id,
@@ -621,6 +692,11 @@ class BradOrchestrator:
 
     def _handle_review_fix(self, state: IssueState, review_comments):
         """Handle PR review comments."""
+        pr_number = state.pr_number
+        if pr_number is None:
+            self.logger.error(f"{state.issue_key}: Cannot address review comments - no PR number")
+            return
+
         if state.review_fix_count >= self.cfg.max_review_fix_iterations:
             self.ticketing.comment(
                 state.issue_key,
@@ -635,7 +711,7 @@ class BradOrchestrator:
             issue_key=state.issue_key, description=state.description,
             review_comments=review_comments,
             repo_path=str(self.repo.repo_path),
-            branch_name=state.branch_name, pr_number=state.pr_number,
+            branch_name=state.branch_name, pr_number=pr_number,
             iteration=state.review_fix_count,
             previous_response_id=state.last_response_id,
         )

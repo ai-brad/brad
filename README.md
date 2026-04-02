@@ -45,21 +45,19 @@ tests/                           # Unit tests
 ## Prerequisites
 
 1. **Python 3.12+**
-2. **Azure OpenAI** resource with a deployed model
-3. **Git**
-4. **JIRA Account** with API access
-5. **GitHub Account** with API access
-6. **Target Repository** — the repository Brad will work on
+2. **uv**
+3. **Azure OpenAI** resource with a deployed model
+4. **Git**
+5. **JIRA Account** with API access
+6. **GitHub Account** with API access
+7. **Target Repository** — the repository Brad will work on
 
 ## Installation
 
 ```bash
 git clone <brad-repo-url>
 cd brad
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux/macOS
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Configuration
@@ -80,13 +78,13 @@ Copy `.env.example` to `.env` and fill in your values. See `.env.example` for al
 ### Run Brad (process issues once)
 
 ```bash
-python brad.py run --once
+uv run python brad.py run --once
 ```
 
 ### Start Web GUI
 
 ```bash
-;;
+uv run python brad_gui.py
 ```
 
 The GUI shows execution history, per-ticket cost breakdowns, CI/CD status, and real-time backend status.
@@ -94,7 +92,7 @@ The GUI shows execution history, per-ticket cost breakdowns, CI/CD status, and r
 ### Debug Logging
 
 ```bash
-python brad.py run --once --log-level DEBUG
+uv run python brad.py run --once --log-level DEBUG
 ```
 
 ## Workflow
@@ -116,9 +114,15 @@ python brad.py run --once --log-level DEBUG
 
 ## Testing
 
+Install test dependencies with:
 ```bash
-pytest tests/ -v
-pytest tests/ --cov=brad --cov-report=html
+uv sync --extra test
+```
+
+Run the test suite with:
+```bash
+uv run pytest tests/ -v
+uv run pytest tests/ --cov=brad --cov-report=html
 ```
 
 ## Contributing

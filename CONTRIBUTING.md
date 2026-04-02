@@ -111,11 +111,16 @@ class GitLabAdapter(CodeRepositoryAdapter):
 
 ## Testing
 
+Install dependencies with:
+
+```bash
+uv sync --extra test
+```
+
 Run the test suite:
 
 ```bash
-.venv\Scripts\activate   # Windows
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 All tests must pass before submitting a PR.
