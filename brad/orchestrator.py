@@ -508,6 +508,7 @@ class BradOrchestrator:
                 self._handle_ci_monitoring(state)
                 return True
             if review_result.get("action") == "changes_requested":
+                state.local_review_fix_count += 1
                 return self._handle_local_review_fix(state, review_result.get("message", ""))
 
             self.ticketing.comment(state.issue_key, "Local review could not be completed after fixes. Proceeding to CI/CD...")
