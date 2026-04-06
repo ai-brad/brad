@@ -118,6 +118,31 @@ class AzureOpenAIAdapter(LLMAdapter):
                 "additionalProperties": False
             }
         },
+        {
+            "type": "function",
+            "name": "multi_edit_file",
+            "description": "Apply multiple edits to one or more files in a single call. Each edit replaces old_text with new_text. Use this instead of multiple edit_file calls.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "description": "Array of edit operations",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "File path relative to repo root"},
+                                "old_text": {"type": "string", "description": "Exact text to find"},
+                                "new_text": {"type": "string", "description": "Replacement text"}
+                            },
+                            "required": ["path", "old_text", "new_text"]
+                        }
+                    }
+                },
+                "required": ["edits"],
+                "additionalProperties": False
+            }
+        },
     ]
 
     SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.mypy_cache', '.pytest_cache',
@@ -274,9 +299,15 @@ class AzureOpenAIAdapter(LLMAdapter):
                     self.logger.error(f"API {resp.status_code}: {resp.text[:500]}")
                     return None
                 return resp.json()
-            except http_requests.exceptions.Timeout:
-                self.logger.warning(f"API timeout (attempt {attempt+1}/{max_retries})")
-                continue
+            except (http_requests.exceptions.Timeout, http_requests.exceptions.ConnectionError) as e:
+                self.logger.warning(f"API {type(e).__name__} (attempt {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    wait = min(10 * (2 ** attempt), 120)
+                    self.logger.warning(f"Retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                self.logger.error(f"API call failed after {max_retries} attempts: {e}")
+                return None
             except Exception as e:
                 self.logger.error(f"API call error: {e}")
                 return None
@@ -304,6 +335,8 @@ class AzureOpenAIAdapter(LLMAdapter):
                 return self._tool_list_directory(repo_path, args.get("path", "."))
             elif name == "find_files":
                 return self._tool_find_files(repo_path, args.get("pattern", ""), args.get("path", "."))
+            elif name == "multi_edit_file":
+                return self._tool_multi_edit_file(repo_path, args.get("edits", []))
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
@@ -445,6 +478,21 @@ class AzureOpenAIAdapter(LLMAdapter):
             return "\n".join(lines) if lines else "(empty)"
         except Exception as e:
             return f"Error: {e}"
+
+    def _tool_multi_edit_file(self, repo_path: str, edits: List[Dict]) -> str:
+        if not edits:
+            return "Error: no edits provided"
+        results = []
+        for i, edit in enumerate(edits):
+            path = edit.get("path", "")
+            old_text = edit.get("old_text", "")
+            new_text = edit.get("new_text", "")
+            if not path or not old_text:
+                results.append(f"Edit {i+1}: Error: missing path or old_text")
+                continue
+            result = self._tool_edit_file(repo_path, path, old_text, new_text)
+            results.append(f"Edit {i+1} ({path}): {result}")
+        return "\n".join(results)
 
     def _tool_find_files(self, repo_path: str, pattern: str, path: str = ".") -> str:
         dp = Path(repo_path) / path

@@ -1,4 +1,5 @@
 """Jira ticketing system adapter."""
+import time
 import requests
 from typing import List, Dict
 from pathlib import Path
@@ -18,7 +19,26 @@ class JiraAdapter(TicketingAdapter):
             "Content-Type": "application/json",
         }
         self.attachments_dir = Path(cfg.attachments_dir)
+        self._max_retries = 5
+        self._base_wait = 5  # seconds
         self.logger.info(f"Initialized Jira adapter for {self.base_url}")
+
+    def _request_with_retry(self, method: str, url: str, **kwargs):
+        """HTTP request with retry on transient network errors."""
+        kwargs.setdefault("timeout", 30)
+        kwargs.setdefault("auth", self.auth)
+        kwargs.setdefault("headers", self.headers)
+        func = getattr(requests, method)
+        for attempt in range(self._max_retries):
+            try:
+                resp = func(url, **kwargs)
+                return resp
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt == self._max_retries - 1:
+                    raise
+                wait = self._base_wait * (2 ** attempt)
+                self.logger.warning(f"Network error ({type(e).__name__}), retrying in {wait}s (attempt {attempt+1}/{self._max_retries})")
+                time.sleep(wait)
 
     # -------------------------
     # Issue fetching
@@ -30,15 +50,13 @@ class JiraAdapter(TicketingAdapter):
         self.logger.debug(f"JQL query: {jql}")
 
         try:
-            resp = requests.post(
+            resp = self._request_with_retry(
+                "post",
                 f"{self.base_url}/rest/api/3/search/jql",
-                auth=self.auth,
-                headers=self.headers,
                 json={
                     "jql": jql,
                     "fields": ["summary", "description", "attachment", "status", "assignee", "created", "updated"],
                 },
-                timeout=30,
             )
             resp.raise_for_status()
 
@@ -119,12 +137,10 @@ class JiraAdapter(TicketingAdapter):
         }
 
         try:
-            resp = requests.post(
+            resp = self._request_with_retry(
+                "post",
                 f"{self.base_url}/rest/api/3/issue/{issue_key}/comment",
-                auth=self.auth,
-                headers=self.headers,
                 json=payload,
-                timeout=30,
             )
             resp.raise_for_status()
             self.logger.info(f"Successfully added comment to {issue_key}")
@@ -163,12 +179,10 @@ class JiraAdapter(TicketingAdapter):
                 }
             }
 
-            resp = requests.post(
+            resp = self._request_with_retry(
+                "post",
                 f"{self.base_url}/rest/api/3/issue/{issue_key}/transitions",
-                auth=self.auth,
-                headers=self.headers,
                 json=payload,
-                timeout=30,
             )
             resp.raise_for_status()
             self.logger.info(f"Successfully set {issue_key} status to '{target_status}'")
@@ -203,11 +217,11 @@ class JiraAdapter(TicketingAdapter):
 
             try:
                 self.logger.debug(f"Downloading {filename} from {content_url}")
-                resp = requests.get(
+                resp = self._request_with_retry(
+                    "get",
                     content_url,
-                    auth=self.auth,
                     timeout=120,
-                    stream=True
+                    stream=True,
                 )
                 resp.raise_for_status()
 
@@ -228,21 +242,17 @@ class JiraAdapter(TicketingAdapter):
     # -------------------------
 
     def _get_transitions(self, issue_key: str) -> List[Dict]:
-        resp = requests.get(
+        resp = self._request_with_retry(
+            "get",
             f"{self.base_url}/rest/api/3/issue/{issue_key}/transitions",
-            auth=self.auth,
-            headers=self.headers,
-            timeout=30,
         )
         resp.raise_for_status()
         return resp.json().get("transitions", [])
 
     def _put_issue(self, issue_key: str, payload: Dict):
-        resp = requests.put(
+        resp = self._request_with_retry(
+            "put",
             f"{self.base_url}/rest/api/3/issue/{issue_key}",
-            auth=self.auth,
-            headers=self.headers,
             json=payload,
-            timeout=30,
         )
         resp.raise_for_status()

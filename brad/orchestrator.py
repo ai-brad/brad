@@ -7,7 +7,7 @@ requirements → implementation → local review → CI monitoring → deploymen
 import re
 import subprocess
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from brad.logging_config import get_logger
 from brad.config import Config
@@ -40,6 +40,7 @@ class IssueState:
     ci_fix_count: int = 0
     review_fix_count: int = 0
     local_review_fix_count: int = 0
+    cost_budget: float = 10.0
 
 
 class BradOrchestrator:
@@ -64,7 +65,99 @@ class BradOrchestrator:
         # Model identity for cache keys
         self._model_identity = f"{cfg.azure_openai_endpoint}|{cfg.azure_openai_model}"
 
+        # Load and cache repo dev instructions
+        self._repo_dev_instructions = self._load_repo_instructions()
+
         self.logger.info(f"Brad orchestrator initialized (model: {cfg.azure_openai_model})")
+
+    def _load_repo_instructions(self) -> str:
+        """Read dev instructions from the target repo's well-known files and cache in DB.
+
+        Looks for CONTRIBUTING.md, README.md, docs/DEVELOPMENT.md, etc.
+        Extracts sections about development setup, running tests, environment.
+        Caches the result in the DB so it persists across runs.
+        """
+        repo_path = self.cfg.target_repo_path
+        cache_key = "dev_instructions"
+
+        # Check if we have a cached version
+        try:
+            cached = db.get_repo_metadata(repo_path, cache_key)
+        except Exception as e:
+            # DB not initialized yet (e.g., during tests)
+            self.logger.debug(f"Could not access DB for repo metadata: {e}")
+            return ""
+
+        # Also check the commit hash to invalidate cache when repo changes
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_path, capture_output=True, text=True, timeout=10,
+            )
+            current_commit = result.stdout.strip()[:12]
+        except Exception:
+            current_commit = "unknown"
+
+        cached_commit = db.get_repo_metadata(repo_path, "dev_instructions_commit")
+        if cached and cached_commit == current_commit:
+            self.logger.info(f"Repo dev instructions loaded from cache ({len(cached)} chars)")
+            return cached
+
+        # Read well-known documentation files
+        _DOC_FILES = [
+            "CONTRIBUTING.md",
+            "README.md",
+            "docs/DEVELOPMENT.md",
+            "docs/CONTRIBUTING.md",
+            "BRAD.md",
+        ]
+
+        from pathlib import Path
+        instructions_parts = []
+        source_files = []
+        for doc_file in _DOC_FILES:
+            doc_path = Path(repo_path) / doc_file
+            if doc_path.exists():
+                try:
+                    content = doc_path.read_text(encoding="utf-8", errors="replace")
+                    if len(content) > 5000:
+                        content = content[:5000] + "\n... (truncated)"
+                    instructions_parts.append(f"--- {doc_file} ---\n{content}")
+                    source_files.append(doc_file)
+                    self.logger.info(f"Read repo doc: {doc_file} ({len(content)} chars)")
+                except Exception as e:
+                    self.logger.warning(f"Failed to read {doc_file}: {e}")
+
+        if not instructions_parts:
+            self.logger.info("No dev documentation found in target repo")
+            return ""
+
+        combined = "\n\n".join(instructions_parts)
+
+        # Cache in DB
+        db.set_repo_metadata(repo_path, cache_key, combined, ", ".join(source_files))
+        db.set_repo_metadata(repo_path, "dev_instructions_commit", current_commit)
+        self.logger.info(f"Cached repo dev instructions ({len(combined)} chars from {source_files})")
+        return combined
+
+    def _set_phase(self, state: IssueState, phase: str, detail: str = "") -> None:
+        """Update execution's current phase for live GUI display."""
+        db.update_execution_phase(state.execution_id, phase, detail)
+        self.logger.info(f"{state.issue_key}: Phase → {phase}" + (f" ({detail})" if detail else ""))
+
+    def _check_cost_budget(self, state: IssueState) -> bool:
+        """Check if execution has exceeded its cost budget. Returns True if over budget."""
+        current_cost = db.get_execution_cost(state.execution_id)
+        if current_cost >= state.cost_budget:
+            self.logger.error(f"{state.issue_key}: Cost budget exceeded (${current_cost:.2f} >= ${state.cost_budget:.2f})")
+            self.ticketing.comment(
+                state.issue_key,
+                f"Brad aborted: cost budget exceeded (${current_cost:.2f} >= ${state.cost_budget:.2f}). "
+                f"This prevents runaway token spending. Please review and re-assign if needed."
+            )
+            db.update_execution_phase(state.execution_id, "budget_exceeded", f"${current_cost:.2f} >= ${state.cost_budget:.2f}")
+            return True
+        return False
 
     def _calculate_cost(self, usage) -> float:
         """Calculate cost from LLM usage stats using DB model costs.
@@ -104,6 +197,13 @@ class BradOrchestrator:
         self.logger.info("=" * 80)
 
         try:
+            # Rebase any open Brad PRs that are behind main
+            self.logger.info("Rebasing open Brad PRs...")
+            try:
+                self._rebase_open_prs()
+            except Exception as e:
+                self.logger.error(f"Failed to rebase PRs: {e}")
+
             # First, check for review comments on existing PRs
             self.logger.info("Checking for code review comments...")
             try:
@@ -140,6 +240,30 @@ class BradOrchestrator:
             self.logger.info("Brad run completed")
             self.logger.info("=" * 80)
 
+    def _rebase_open_prs(self):
+        """Rebase all open Brad PRs that are behind main, skipping those with conflicts."""
+        brad_prs = db.get_open_brad_prs()
+        if not brad_prs:
+            self.logger.info("No open Brad PRs to rebase")
+            return
+
+        self.logger.info(f"Checking {len(brad_prs)} Brad PRs for rebase")
+        for pr_info in brad_prs:
+            pr_number = pr_info["pr_number"]
+            issue_key = pr_info["issue_key"]
+            try:
+                result = self.code_repo.rebase_pr(pr_number)
+                if result.get("rebased"):
+                    self.logger.info(f"Rebased PR #{pr_number} ({issue_key})")
+                elif result.get("up_to_date"):
+                    self.logger.debug(f"PR #{pr_number} ({issue_key}) already up to date")
+                elif result.get("conflict"):
+                    self.logger.warning(f"PR #{pr_number} ({issue_key}) has merge conflicts, skipping")
+                elif result.get("error"):
+                    self.logger.warning(f"PR #{pr_number} ({issue_key}) rebase error: {result['error']}")
+            except Exception as e:
+                self.logger.warning(f"Failed to rebase PR #{pr_number} ({issue_key}): {e}")
+
     def _process_review_comments(self):
         """Check all Brad PRs for new review comments and process them."""
         brad_prs = self.code_repo.get_brad_prs()
@@ -156,50 +280,70 @@ class BradOrchestrator:
 
             self.logger.info(f"Found {len(comments)} unresponded comments on PR #{pr_number}")
 
-            for comment in comments:
-                try:
-                    self._process_single_review_comment(pr_number, branch_name, comment)
-                except Exception as e:
-                    self.logger.error(f"Failed to process comment {comment['id']}: {e}")
+            # Fail-fast: check branch existence ONCE before processing any comments
+            try:
+                self.repo.checkout_branch(branch_name)
+                self.repo._run_git("fetch", "origin", branch_name, check=False)
+                self.repo._run_git("reset", "--hard", f"origin/{branch_name}", check=False)
+            except Exception as e:
+                self.logger.warning(f"PR #{pr_number}: Skipping all {len(comments)} comments — branch '{branch_name}' unavailable: {e}")
+                continue
 
-    def _process_single_review_comment(self, pr_number: int, branch_name: str, comment: Dict):
-        """Process a single review comment using the Code Review Reader."""
-        comment_id = comment['id']
+            # Branch is ready — batch all comments into a single LLM call
+            self._process_review_comments_batch(pr_number, branch_name, comments)
 
-        # Reply "Brad checking" to claim it
-        self.code_repo.reply_to_review_comment(pr_number, comment_id, "Brad checking")
+    def _process_review_comments_batch(self, pr_number: int, branch_name: str, comments: List[Dict]):
+        """Process all review comments for a PR in a single LLM call."""
+        # Claim all comments first
+        for comment in comments:
+            try:
+                self.code_repo.reply_to_review_comment(pr_number, comment['id'], "Brad reaction: checking...")
+            except Exception as e:
+                self.logger.warning(f"Failed to claim comment {comment['id']}: {e}")
 
-        # Checkout branch and sync
-        self.repo.checkout_branch(branch_name)
-        self.repo._run_git("fetch", "origin", branch_name, check=False)
-        self.repo._run_git("reset", "--hard", f"origin/{branch_name}", check=False)
-
-        # Use the Code Review Reader to analyze and act on the comment
-        result = self.agent.invoke_code_review_reader(
+        # Single batched LLM call for all comments
+        result = self.agent.invoke_code_review_reader_batch(
             pr_number=pr_number,
             branch_name=branch_name,
-            comment=comment,
+            comments=comments,
             repo_path=str(self.repo.repo_path),
+            dev_instructions=self._repo_dev_instructions,
         )
 
-        action = result.get('action')
-        reply_text = result.get('reply', '')
+        # Process results for each comment
+        comment_results = result.get('comment_results', [])
+        overall_code_changed = False
 
-        if action == 'error':
-            raise Exception(result.get('message', 'Unknown error'))
+        for cr in comment_results:
+            comment_id = cr.get('comment_id')
+            action = cr.get('action')
+            reply_text = cr.get('reply', '')
 
-        if action == 'code_changed':
-            # Push changes and reply
+            if not comment_id:
+                continue
+
+            if action == 'code_changed':
+                overall_code_changed = True
+                prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Fixed in latest push."
+                self.code_repo.reply_to_review_comment(pr_number, comment_id, prefixed)
+            elif action == 'replied':
+                prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Acknowledged."
+                self.code_repo.reply_to_review_comment(pr_number, comment_id, prefixed)
+            elif action == 'error':
+                self.logger.error(f"Comment {comment_id}: {cr.get('message', 'Unknown error')}")
+            else:
+                prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Acknowledged."
+                self.code_repo.reply_to_review_comment(pr_number, comment_id, prefixed)
+
+        # Push once if any comment led to code changes
+        if overall_code_changed:
             try:
                 self.repo.push(branch_name, force=False)
             except Exception:
-                self.repo.push(branch_name, force=True)
-            self.code_repo.reply_to_review_comment(pr_number, comment_id, reply_text or "Fixed in latest push.")
-        elif action == 'replied':
-            # Just reply to the comment, no code changes
-            self.code_repo.reply_to_review_comment(pr_number, comment_id, reply_text or "Acknowledged.")
-        else:
-            self.code_repo.reply_to_review_comment(pr_number, comment_id, f"Brad could not resolve this: {reply_text}")
+                try:
+                    self.repo.push(branch_name, force=True)
+                except Exception as e:
+                    self.logger.error(f"Failed to push changes for PR #{pr_number}: {e}")
 
     def _process_issue(self, issue: Dict):
         """Process a single issue through the Brad workflow."""
@@ -214,6 +358,8 @@ class BradOrchestrator:
         execution_id = db.create_execution(issue_key, summary)
 
         try:
+            db.update_execution_phase(execution_id, "initializing", "Preparing to process issue")
+
             # Step 1: Remove BradReview label immediately
             self.ticketing.remove_label(issue_key, "BradReview")
 
@@ -246,17 +392,15 @@ class BradOrchestrator:
                 branch_name=branch_name,
                 execution_id=execution_id,
                 jira_updated=fields.get("updated", ""),
+                cost_budget=float(self.cfg.__dict__.get("cost_budget")),
             )
 
-            # Step 4: If branch/PR already exist, close the old PR and clean up (re-trigger)
+            # Step 4: Close stale PRs from previous executions of the same issue
+            self._set_phase(state, "closing_stale_prs", "Checking for old PRs to close")
+            self._close_stale_prs(state)
+
+            # Step 5: If branch already exists remotely, clean up for fresh start
             if self.repo.branch_exists_remote(branch_name):
-                pr_number = self.code_repo.pr_exists_for_branch(branch_name)
-                if pr_number:
-                    self.logger.info(f"{issue_key}: Closing old PR #{pr_number} and deleting branch for fresh start")
-                    try:
-                        self.code_repo.close_pr(pr_number, f"Closing: Brad is re-processing {issue_key} with updated requirements.")
-                    except Exception as e:
-                        self.logger.warning(f"{issue_key}: Could not close old PR #{pr_number}: {e}")
                 try:
                     self.repo._run_git("push", "origin", "--delete", branch_name, check=False)
                 except Exception as e:
@@ -266,6 +410,7 @@ class BradOrchestrator:
 
             # Finish execution with status reflecting actual outcome
             final_status = "completed" if state.pr_number else "stuck"
+            db.update_execution_phase(execution_id, "done" if final_status == "completed" else "stuck")
             db.finish_execution(
                 execution_id,
                 status=final_status,
@@ -275,12 +420,26 @@ class BradOrchestrator:
             )
 
         except Exception as e:
+            db.update_execution_phase(execution_id, "error", str(e)[:200])
             db.finish_execution(execution_id, status="error", error_message=str(e)[:500])
             raise
 
+    def _close_stale_prs(self, state: IssueState):
+        """Close any open PRs from previous executions of the same JIRA issue."""
+        try:
+            existing_pr = self.code_repo.pr_exists_for_branch(state.branch_name)
+            if existing_pr:
+                self.logger.info(f"{state.issue_key}: Closing stale PR #{existing_pr} from previous execution")
+                self.code_repo.close_pr(
+                    existing_pr,
+                    f"Superseded by execution #{state.execution_id}. Brad is re-processing {state.issue_key}."
+                )
+        except Exception as e:
+            self.logger.warning(f"{state.issue_key}: Could not close stale PR: {e}")
+
     def _handle_requirements_phase(self, state: IssueState):
         """Handle requirements analysis phase."""
-        self.logger.info(f"{state.issue_key}: Requirements analysis phase")
+        self._set_phase(state, "reading_requirements", "Analyzing issue requirements")
         self.repo.reset_to_clean_state("main")
 
         main_commit = self.repo.get_head_commit("main")
@@ -324,8 +483,8 @@ class BradOrchestrator:
             self.ticketing.comment(state.issue_key, f"Brad encountered an error during requirements analysis:\n\n{message}\n\nBrad is stuck.")
 
     def _handle_implementation_phase(self, state: IssueState):
-        """Handle implementation phase."""
-        self.logger.info(f"{state.issue_key}: Implementation phase")
+        """Handle implementation phase — impl → local review loop → then create PR → CI."""
+        self._set_phase(state, "implementing", "Writing code and tests")
         self.ticketing.comment(state.issue_key, f"Brad is starting implementation for {state.issue_key}...")
 
         self.repo.reset_to_clean_state("main")
@@ -336,46 +495,99 @@ class BradOrchestrator:
             self.repo.checkout_branch(state.branch_name, create_if_missing=False)
             self.repo._run_git("reset", "--hard", f"origin/{state.branch_name}")
 
+        step_id = db.create_step(state.execution_id, "implementation", "Running LLM implementation agent")
         response = self.agent.invoke_implementation(
             issue_key=state.issue_key, description=state.description,
             attachment_paths=state.attachment_paths,
             repo_path=str(self.repo.repo_path),
             branch_name=state.branch_name, iteration=0,
             previous_response_id=state.last_response_id,
+            dev_instructions=self._repo_dev_instructions,
         )
         state.last_response_id = response.get("_response_id")
-        self._record_step(state.execution_id, "implementation", response)
+
+        # Record step costs
+        usage = response.get("_usage")
+        cost = self._calculate_cost(usage)
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost)
 
         action = response.get("action")
         message = response.get("message", "")
-        pr_number = response.get("pr_number")
-        pr_url = response.get("pr_url")
 
-        if action == "success":
-            verified_pr = self._verify_and_ensure_pr(state, pr_number, pr_url)
-            if verified_pr:
-                pr_number, pr_url = verified_pr
-                state.pr_number = pr_number
-                db.update_execution_pr(state.execution_id, pr_number, pr_url)
-                self.ticketing.comment(
-                    state.issue_key,
-                    f"Brad has completed implementation and opened PR #{pr_number}:\n{pr_url}\n\nRunning local code review..."
-                )
-                review_result = self._handle_local_review(state)
-                if review_result.get("action") == "approved":
-                    self.ticketing.comment(state.issue_key, "Local review passed. Monitoring CI/CD...")
-                    self._handle_ci_monitoring(state)
-                elif review_result.get("action") == "changes_requested":
-                    self._handle_local_review_fix(state, review_result.get("message", ""))
-                else:
-                    self.ticketing.comment(state.issue_key, "Local review could not be completed. Proceeding to CI/CD...")
-                    self._handle_ci_monitoring(state)
+        if action != "success":
+            if action == "stuck":
+                self._set_phase(state, "stuck", "Implementation could not complete")
+                self.ticketing.comment(state.issue_key, f"Brad is stuck during implementation:\n\n{message}")
             else:
-                self.ticketing.comment(state.issue_key, "Brad completed implementation but failed to create PR. Manual intervention needed.")
-        elif action == "stuck":
-            self.ticketing.comment(state.issue_key, f"Brad is stuck during implementation:\n\n{message}")
+                self._set_phase(state, "error", "Implementation error")
+                self.ticketing.comment(state.issue_key, f"Brad encountered an error during implementation:\n\n{message}\n\nBrad is stuck.")
+            return
+
+        if self._check_cost_budget(state):
+            return
+
+        # Implementation succeeded — run local review BEFORE creating PR
+        self._set_phase(state, "local_review", "Reviewing code locally before creating PR")
+        self.ticketing.comment(state.issue_key, "Implementation complete. Running local code review before creating PR...")
+        local_review_passed = self._run_local_review_loop(state)
+
+        # Always verify/create PR and persist to DB (even if budget is tight)
+        self._set_phase(state, "creating_pr", "Pushing code and creating pull request")
+        verified_pr = self._verify_and_ensure_pr(state, response.get("pr_number"), response.get("pr_url"))
+        if verified_pr:
+            pr_number, pr_url = verified_pr
+            state.pr_number = pr_number
+            db.update_execution_pr(state.execution_id, pr_number, pr_url)
+
+            # Update PR body with execution metadata
+            self._update_pr_metadata(state, pr_number)
+
+            self.ticketing.comment(
+                state.issue_key,
+                f"Brad created PR #{pr_number}:\n{pr_url}\n\n"
+                f"Local review: {'PASSED' if local_review_passed else 'completed with caveats'}."
+            )
+
+            if self._check_cost_budget(state):
+                return
+
+            self._set_phase(state, "ci_monitoring", f"Waiting for CI on PR #{pr_number}")
+            self._handle_ci_monitoring(state)
         else:
-            self.ticketing.comment(state.issue_key, f"Brad encountered an error during implementation:\n\n{message}\n\nBrad is stuck.")
+            self._set_phase(state, "stuck", "Could not create PR")
+            self.ticketing.comment(state.issue_key, "Brad completed implementation but failed to create PR. Manual intervention needed.")
+
+    def _update_pr_metadata(self, state: IssueState, pr_number: int):
+        """Update PR body with execution metadata for traceability."""
+        try:
+            exec_data = db.get_execution(state.execution_id)
+            body = (
+                f"## Brad Execution #{state.execution_id}\n\n"
+                f"- **JIRA Issue:** [{state.issue_key}]({self.cfg.jira_url}/browse/{state.issue_key})\n"
+                f"- **Execution ID:** {state.execution_id}\n"
+                f"- **Started:** {exec_data.get('started_at', 'N/A') if exec_data else 'N/A'}\n"
+                f"- **Cost so far:** ${exec_data.get('total_cost', 0):.4f}\n"
+                f"\n---\n*Automated by Brad — Execution #{state.execution_id}*"
+            )
+            self.code_repo.update_pr_body(pr_number, body)
+        except Exception as e:
+            self.logger.warning(f"{state.issue_key}: Could not update PR metadata: {e}")
+
+    def _run_local_review_loop(self, state: IssueState) -> bool:
+        """Run impl → local review → fix loop. Returns True if review passed."""
+        review_result = self._handle_local_review(state)
+
+        if review_result.get("action") == "approved":
+            return True
+
+        if review_result.get("action") == "changes_requested":
+            return self._handle_local_review_fix(state, review_result.get("message", ""))
+
+        # Review errored or unknown — proceed anyway
+        return False
 
     def _verify_and_ensure_pr(self, state: IssueState, claimed_pr_number, claimed_pr_url):
         """Verify that PR actually exists. If not, attempt to create it."""
@@ -429,8 +641,8 @@ class BradOrchestrator:
 
     def _handle_local_review(self, state: IssueState) -> Dict:
         """Run a fresh-context local review and return its structured outcome."""
-        self.logger.info(f"{state.issue_key}: Starting local code review")
-        step_id = db.create_step(state.execution_id, "local_review")
+        self._set_phase(state, "local_review", "Running automated code review")
+        step_id = db.create_step(state.execution_id, "local_review", "Generating diff and reviewing")
         try:
             diff_result = subprocess.run(
                 ["git", "diff", "origin/main...HEAD"],
@@ -472,6 +684,7 @@ class BradOrchestrator:
 
     def _handle_local_review_fix(self, state: IssueState, review_feedback: str) -> bool:
         """Address local review feedback and rerun local review before CI."""
+        self._set_phase(state, "local_review_fix", f"Addressing review feedback (attempt {state.local_review_fix_count + 1})")
         if state.local_review_fix_count >= self.cfg.max_review_fix_iterations:
             self.ticketing.comment(
                 state.issue_key,
@@ -482,6 +695,7 @@ class BradOrchestrator:
         self.repo.checkout_branch(state.branch_name, create_if_missing=False)
         self.repo._run_git("pull", "origin", state.branch_name)
 
+        step_id = db.create_step(state.execution_id, "local_review_fix", f"Fixing review feedback (attempt {state.local_review_fix_count + 1})", iteration=state.local_review_fix_count)
         response = self.agent.invoke_local_review_fix(
             issue_key=state.issue_key, description=state.description,
             review_feedback=review_feedback,
@@ -489,9 +703,17 @@ class BradOrchestrator:
             branch_name=state.branch_name,
             iteration=state.local_review_fix_count,
             previous_response_id=state.last_response_id,
+            dev_instructions=self._repo_dev_instructions,
         )
         state.last_response_id = response.get("_response_id")
-        self._record_step(state.execution_id, "local_review_fix", response)
+
+        # Record step costs
+        usage = response.get("_usage")
+        cost = self._calculate_cost(usage)
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost)
 
         action = response.get("action")
         message = response.get("message", "")
@@ -502,18 +724,19 @@ class BradOrchestrator:
                 state.issue_key,
                 f"Brad addressed local review feedback (attempt {state.local_review_fix_count}):\n\n{message}\n\nRe-running local review..."
             )
+
+            if self._check_cost_budget(state):
+                return False
+
             review_result = self._handle_local_review(state)
             if review_result.get("action") == "approved":
-                self.ticketing.comment(state.issue_key, "Local review passed. Monitoring CI/CD...")
-                self._handle_ci_monitoring(state)
                 return True
             if review_result.get("action") == "changes_requested":
                 state.local_review_fix_count += 1
                 return self._handle_local_review_fix(state, review_result.get("message", ""))
 
-            self.ticketing.comment(state.issue_key, "Local review could not be completed after fixes. Proceeding to CI/CD...")
-            self._handle_ci_monitoring(state)
-            return True
+            # Review errored — treat as passed with caveats
+            return False
         if action == "stuck":
             self.ticketing.comment(
                 state.issue_key,
@@ -534,8 +757,8 @@ class BradOrchestrator:
             self.logger.error(f"{state.issue_key}: Cannot monitor CI - no PR number")
             return
 
-        self.logger.info(f"{state.issue_key}: Monitoring CI for PR #{pr_number}")
-        step_id = db.create_step(state.execution_id, "ci_monitoring")
+        self._set_phase(state, "ci_monitoring", f"Waiting for CI on PR #{pr_number}")
+        step_id = db.create_step(state.execution_id, "ci_monitoring", f"Monitoring CI for PR #{pr_number}")
 
         deploy_info = self.ci.resolve_deployment_env(pr_number=pr_number)
 
@@ -551,8 +774,10 @@ class BradOrchestrator:
             db.finish_step(step_id, status="error", result_summary=f"CI failed: {', '.join(ci_result.failed_jobs)}"[:500])
 
         if ci_result.success:
+            self._set_phase(state, "ci_passed", f"CI passed for PR #{pr_number}")
             deployment_summary = ""
             if self.cfg.deployment_health_check and deploy_info:
+                self._set_phase(state, "deployment_health_check", "Checking deployment health")
                 deployment_summary = self._check_deployment_after_ci(state, deploy_info)
 
             # Check for review comments (allow windsurf-bot, filter other bots)
@@ -568,12 +793,14 @@ class BradOrchestrator:
                     review_comments.append(c)
 
             if review_comments:
+                self._set_phase(state, "addressing_review_comments", f"{len(review_comments)} review comments to address")
                 self.ticketing.comment(
                     state.issue_key,
                     f"CI passed, but there are {len(review_comments)} review comments to address. Brad is working on them..."
                 )
                 self._handle_review_fix(state, review_comments)
             else:
+                self._set_phase(state, "done", "All CI checks passed, no review comments")
                 try:
                     self.ticketing.set_status(state.issue_key, "REVIEW")
                 except Exception as e:
@@ -584,6 +811,7 @@ class BradOrchestrator:
                     done_msg += f"\n\n{deployment_summary}"
                 self.ticketing.comment(state.issue_key, done_msg)
         else:
+            self._set_phase(state, "ci_failed", f"CI failed: {', '.join(ci_result.failed_jobs)}"[:200])
             detailed_logs = self._fetch_detailed_ci_logs(state, ci_result)
 
             if state.ci_fix_count >= self.cfg.max_ci_fix_iterations:
@@ -652,11 +880,17 @@ class BradOrchestrator:
             self.logger.error(f"{state.issue_key}: Cannot fix CI - no PR number")
             return
 
+        if self._check_cost_budget(state):
+            return
+
+        self._set_phase(state, "ci_fix", f"Fixing CI failures (attempt {state.ci_fix_count + 1})")
+
         self.repo.checkout_branch(state.branch_name, create_if_missing=False)
         self.repo._run_git("pull", "origin", state.branch_name)
 
         failed_test_target = extract_failed_tests_from_ci_logs(ci_result.logs)
 
+        step_id = db.create_step(state.execution_id, "ci_fix", f"Fixing CI: {', '.join(ci_result.failed_jobs)}"[:200], iteration=state.ci_fix_count)
         response = self.agent.invoke_ci_fix(
             issue_key=state.issue_key, description=state.description,
             ci_logs=ci_result.logs, failed_jobs=ci_result.failed_jobs,
@@ -665,9 +899,17 @@ class BradOrchestrator:
             iteration=state.ci_fix_count,
             failed_test_target=failed_test_target,
             previous_response_id=state.last_response_id,
+            dev_instructions=self._repo_dev_instructions,
         )
         state.last_response_id = response.get("_response_id")
-        self._record_step(state.execution_id, "ci_fix", response)
+
+        # Record step costs
+        usage = response.get("_usage")
+        cost_val = self._calculate_cost(usage)
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost_val)
 
         action = response.get("action")
         message = response.get("message", "")
@@ -698,6 +940,11 @@ class BradOrchestrator:
             self.logger.error(f"{state.issue_key}: Cannot address review comments - no PR number")
             return
 
+        if self._check_cost_budget(state):
+            return
+
+        self._set_phase(state, "review_fix", f"Addressing {len(review_comments)} review comments (attempt {state.review_fix_count + 1})")
+
         if state.review_fix_count >= self.cfg.max_review_fix_iterations:
             self.ticketing.comment(
                 state.issue_key,
@@ -708,6 +955,7 @@ class BradOrchestrator:
         self.repo.checkout_branch(state.branch_name, create_if_missing=False)
         self.repo._run_git("pull", "origin", state.branch_name)
 
+        step_id = db.create_step(state.execution_id, "review_fix", f"Addressing {len(review_comments)} review comments", iteration=state.review_fix_count)
         response = self.agent.invoke_review_fix(
             issue_key=state.issue_key, description=state.description,
             review_comments=review_comments,
@@ -715,9 +963,17 @@ class BradOrchestrator:
             branch_name=state.branch_name, pr_number=pr_number,
             iteration=state.review_fix_count,
             previous_response_id=state.last_response_id,
+            dev_instructions=self._repo_dev_instructions,
         )
         state.last_response_id = response.get("_response_id")
-        self._record_step(state.execution_id, "review_fix", response)
+
+        # Record step costs
+        usage = response.get("_usage")
+        cost_val = self._calculate_cost(usage)
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost_val)
 
         action = response.get("action")
         message = response.get("message", "")

@@ -122,16 +122,44 @@ def update_execution_pr(execution_id: int, pr_number: int, pr_url: str) -> None:
     logger.info(f"Execution #{execution_id} linked to PR #{pr_number}")
 
 
+def update_execution_phase(execution_id: int, phase: str, detail: str = "") -> None:
+    """Update the current phase and detail for live dashboard display."""
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE executions SET current_phase=?, current_phase_detail=? WHERE id=?",
+            (phase, detail[:500] if detail else "", execution_id),
+        )
+
+
+def get_execution_cost(execution_id: int) -> float:
+    """Get current total cost for an execution."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT total_cost FROM executions WHERE id=?", (execution_id,)
+        ).fetchone()
+        return float(row["total_cost"]) if row else 0.0
+
+
+def get_latest_execution_for_issue(issue_key: str) -> Optional[Dict]:
+    """Get the most recent execution for a JIRA issue."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM executions WHERE issue_key=? ORDER BY started_at DESC LIMIT 1",
+            (issue_key,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 # -------------------------
 # Steps
 # -------------------------
 
-def create_step(execution_id: int, phase: str) -> int:
+def create_step(execution_id: int, phase: str, detail: str = "", iteration: int = 0) -> int:
     """Create a new step within an execution. Returns the step ID."""
     with _get_conn() as conn:
         cursor = conn.execute(
-            "INSERT INTO steps (execution_id, phase, started_at, status) VALUES (?, ?, ?, ?)",
-            (execution_id, phase, _now(), "running"),
+            "INSERT INTO steps (execution_id, phase, started_at, status, detail, iteration) VALUES (?, ?, ?, ?, ?, ?)",
+            (execution_id, phase, _now(), "running", detail[:500] if detail else "", iteration),
         )
         step_id = cursor.lastrowid
         logger.debug(f"Created step #{step_id} ({phase}) for execution #{execution_id}")
@@ -144,6 +172,15 @@ def finish_step(step_id: int, status: str = "completed", prompt_tokens: int = 0,
         conn.execute(
             "UPDATE steps SET finished_at=?, status=?, prompt_tokens=?, completion_tokens=?, cost=?, result_summary=? WHERE id=?",
             (_now(), status, prompt_tokens, completion_tokens, cost, result_summary, step_id),
+        )
+
+
+def update_step_detail(step_id: int, detail: str) -> None:
+    """Update the detail text on a running step."""
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE steps SET detail=? WHERE id=?",
+            (detail[:500] if detail else "", step_id),
         )
 
 
@@ -227,6 +264,28 @@ def get_total_costs() -> Dict:
             FROM executions"""
         ).fetchone()
         return dict(row) if row else {}
+
+
+def get_open_brad_prs() -> List[Dict]:
+    """Get all executions that have a PR number and completed successfully.
+    These PRs may still be open on GitHub and eligible for rebasing."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """SELECT id, issue_key, pr_number, pr_url, status, started_at, finished_at
+               FROM executions
+               WHERE pr_number IS NOT NULL
+                 AND status = 'completed'
+               ORDER BY finished_at DESC""",
+        ).fetchall()
+        # Deduplicate by pr_number (keep most recent execution per PR)
+        seen = set()
+        result = []
+        for r in rows:
+            d = dict(r)
+            if d["pr_number"] not in seen:
+                seen.add(d["pr_number"])
+                result.append(d)
+        return result
 
 
 def get_running_execution() -> Optional[Dict]:
@@ -319,3 +378,29 @@ def get_all_model_costs() -> List[Dict]:
     with _get_conn() as conn:
         rows = conn.execute("SELECT * FROM model_costs ORDER BY model_pattern").fetchall()
         return [dict(r) for r in rows]
+
+
+# ---- Repo metadata cache ----
+
+def get_repo_metadata(repo_path: str, key: str) -> Optional[str]:
+    """Get a cached metadata value for a repo."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT value FROM repo_metadata WHERE repo_path = ? AND key = ?",
+            (repo_path, key),
+        ).fetchone()
+        return row["value"] if row else None
+
+
+def set_repo_metadata(repo_path: str, key: str, value: str, source_file: str = "") -> None:
+    """Cache a metadata value for a repo (upsert)."""
+    with _get_conn() as conn:
+        conn.execute(
+            """INSERT INTO repo_metadata (repo_path, key, value, source_file, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(repo_path, key) DO UPDATE SET
+                   value=excluded.value,
+                   source_file=excluded.source_file,
+                   updated_at=excluded.updated_at""",
+            (repo_path, key, value, source_file, _now()),
+        )

@@ -7,16 +7,25 @@
         <a href="{{ jira_url }}/browse/{{ execution.issue_key }}" target="_blank" class="issue-link">{{ execution.issue_key }}</a>
         {% if execution.summary %} — {{ execution.summary }}{% endif %}
     </h2>
-    <div class="detail-meta">
+    <div class="detail-meta" id="d-meta">
         <div>
             <strong>Status:</strong>
-            <span class="badge badge-{{ execution.status }}">{{ execution.status }}</span>
+            <span class="badge badge-{{ execution.status }}" id="d-status-badge">{{ execution.status }}</span>
+        </div>
+        <div id="d-phase-box">
+            {% if execution.current_phase %}
+            <strong>Current Phase:</strong>
+            <span class="badge badge-running">{{ execution.current_phase }}</span>
+            {% if execution.current_phase_detail %}<small> {{ execution.current_phase_detail }}</small>{% endif %}
+            {% endif %}
         </div>
         <div><strong>Started:</strong> <span data-utc="{{ execution.started_at }}">{{ execution.started_at }}</span></div>
-        <div><strong>Finished:</strong> <span data-utc="{{ execution.finished_at }}">{{ execution.finished_at or '—' }}</span></div>
+        <div><strong>Finished:</strong> <span data-utc="{{ execution.finished_at }}" id="d-finished">{{ execution.finished_at or '—' }}</span></div>
+        <div id="d-pr-box">
         {% if execution.pr_url %}
-        <div><strong>PR:</strong> <a href="{{ execution.pr_url }}" target="_blank">PR #{{ execution.pr_number }}</a></div>
+            <strong>PR:</strong> <a href="{{ execution.pr_url }}" target="_blank">PR #{{ execution.pr_number }}</a>
         {% endif %}
+        </div>
     </div>
     <div class="stats-grid" id="d-stats">
         <div class="stat-card">
@@ -52,10 +61,11 @@
     <h2>Steps</h2>
     <div id="steps-container">
     {% if steps %}
-    <div class="timeline">
+    <div class="timeline" id="steps-timeline">
         {% for step in steps %}
         <div class="timeline-item {{ step.status }}">
-            <h3>{{ step.phase | capitalize }}</h3>
+            <h3>{{ step.phase | capitalize }}{% if step.iteration %} <small>(attempt {{ step.iteration + 1 }})</small>{% endif %}</h3>
+            {% if step.detail %}<div class="step-detail">{{ step.detail }}</div>{% endif %}
             <div class="timeline-meta">
                 <span class="badge badge-{{ step.status }}">{{ step.status }}</span>
                 &nbsp;·&nbsp; <span data-utc="{{ step.started_at }}">{{ step.started_at[:19] }}</span>
@@ -86,7 +96,7 @@
 {% endif %}
 
 {% if ci_runs %}
-<div class="card">
+<div class="card" id="ci-runs-card">
     <h2>CI/CD Runs</h2>
     <table>
         <thead>
@@ -126,6 +136,19 @@
 var EXEC_ID = {{ execution.id }};
 var PR_NUMBER = {{ execution.pr_number or 'null' }};
 var GITHUB_REPO = {{ github_repo|tojson }};
+var JIRA_URL = {{ jira_url|tojson }};
+
+function fmtNum(n) { return (n || 0).toLocaleString(); }
+function fmtCost4(n) { return '$' + (n || 0).toFixed(4); }
+function truncate(s, n) { return s && s.length > n ? s.substring(0, n) + '…' : (s || ''); }
+
+function badgeClass(status) {
+    if (status === 'completed' || status === 'approved' || status === 'fixed' || status === 'success') return 'badge-completed';
+    if (status === 'running') return 'badge-running';
+    if (status === 'error') return 'badge-error';
+    if (status === 'stuck' || status === 'changes_requested') return 'badge-stuck';
+    return 'badge-running';
+}
 
 function reviewBadgeClass(state) {
     if (state === 'APPROVED') return 'badge-completed';
@@ -147,17 +170,95 @@ function prStateBadge(state) {
     return '<span class="badge badge-completed">open</span>';
 }
 
+function phaseName(phase) {
+    var names = {
+        'initializing': 'Initializing',
+        'reading_requirements': 'Reading Requirements',
+        'closing_stale_prs': 'Closing Stale PRs',
+        'implementing': 'Implementing',
+        'local_review': 'Local Code Review',
+        'local_review_fix': 'Fixing Review Issues',
+        'creating_pr': 'Creating Pull Request',
+        'ci_monitoring': 'CI/CD Monitoring',
+        'ci_passed': 'CI Passed',
+        'ci_failed': 'CI Failed',
+        'ci_fix': 'Fixing CI Failures',
+        'addressing_review_comments': 'Addressing Review Comments',
+        'review_fix': 'Fixing Review Comments',
+        'deployment_health_check': 'Deployment Health Check',
+        'budget_exceeded': 'Budget Exceeded',
+        'done': 'Done',
+        'stuck': 'Stuck',
+        'error': 'Error'
+    };
+    return names[phase] || phase;
+}
+
+function renderSteps(steps) {
+    var container = document.getElementById('steps-container');
+    if (!container) return;
+    if (!steps || steps.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>No steps recorded yet.</p></div>';
+        return;
+    }
+    var html = '<div class="timeline" id="steps-timeline">';
+    steps.forEach(function(step) {
+        html += '<div class="timeline-item ' + (step.status || 'running') + '">';
+        html += '<h3>' + phaseName(step.phase);
+        if (step.iteration) html += ' <small>(attempt ' + (step.iteration + 1) + ')</small>';
+        html += '</h3>';
+        if (step.detail) html += '<div class="step-detail">' + step.detail + '</div>';
+        html += '<div class="timeline-meta">';
+        html += '<span class="badge ' + badgeClass(step.status) + '">' + (step.status || 'running') + '</span>';
+        html += ' &middot; ' + fmtLocalTime(step.started_at);
+        if (step.finished_at) html += ' &rarr; ' + fmtLocalTime(step.finished_at);
+        html += ' &middot; <span class="cost">' + fmtCost4(step.cost) + '</span>';
+        html += ' &middot; ' + fmtNum((step.prompt_tokens || 0) + (step.completion_tokens || 0)) + ' tokens';
+        html += '</div>';
+        if (step.result_summary) {
+            html += '<div class="step-summary"><pre>' + truncate(step.result_summary, 500) + '</pre></div>';
+        }
+        html += '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+function renderCIRuns(ci_runs) {
+    var card = document.getElementById('ci-runs-card');
+    if (!ci_runs || ci_runs.length === 0) {
+        if (card) card.style.display = 'none';
+        return;
+    }
+    if (!card) {
+        // Create card dynamically if it doesn't exist
+        card = document.createElement('div');
+        card.className = 'card';
+        card.id = 'ci-runs-card';
+        var backLink = document.querySelector('div[style="margin-bottom: 2rem;"]');
+        if (backLink) backLink.parentNode.insertBefore(card, backLink);
+    }
+    card.style.display = '';
+    var html = '<h2>CI/CD Runs</h2><table><thead><tr><th>Workflow</th><th>Conclusion</th><th>Run ID</th><th>Checked At</th></tr></thead><tbody>';
+    ci_runs.forEach(function(run) {
+        var cls = run.conclusion === 'success' ? 'badge-completed' : (run.conclusion === 'failure' ? 'badge-error' : 'badge-running');
+        html += '<tr><td>' + (run.workflow_name || '—') + '</td>' +
+            '<td><span class="badge ' + cls + '">' + (run.conclusion || 'unknown') + '</span></td>' +
+            '<td>' + (run.run_id || '—') + '</td>' +
+            '<td>' + fmtLocalTime(run.checked_at) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    card.innerHTML = html;
+}
+
 function renderPRDetails(data) {
     var el = document.getElementById('pr-details-content');
     if (!el) return;
-
     var html = '<div class="detail-meta" style="margin-bottom:1rem;">' +
         '<div><strong>Status:</strong> ' + prStateBadge(data.state) + '</div>' +
         '<div><strong>Title:</strong> ' + (data.title || '') + '</div>' +
         '<div><a href="' + data.html_url + '" target="_blank">View on GitHub</a></div>' +
         '</div>';
-
-    // Reviews
     if (data.reviews && data.reviews.length > 0) {
         html += '<h3 style="margin:1rem 0 0.5rem;font-size:0.95rem;">Reviews</h3><table><thead><tr><th>Reviewer</th><th>Result</th><th>Date</th></tr></thead><tbody>';
         data.reviews.forEach(function(r) {
@@ -165,12 +266,9 @@ function renderPRDetails(data) {
         });
         html += '</tbody></table>';
     }
-
-    // Checks
     if (data.checks && data.checks.length > 0) {
         html += '<h3 style="margin:1rem 0 0.5rem;font-size:0.95rem;">CI/CD Checks</h3><table><thead><tr><th>Check</th><th>Status</th><th>Conclusion</th><th></th></tr></thead><tbody>';
         data.checks.forEach(function(c) {
-            var conclusion = c.conclusion || c.status;
             html += '<tr><td>' + c.name + '</td>' +
                 '<td><span class="badge ' + (c.status === 'completed' ? 'badge-completed' : 'badge-running') + '">' + c.status + '</span></td>' +
                 '<td><span class="badge ' + checkBadgeClass(c.conclusion) + '">' + (c.conclusion || 'pending') + '</span></td>' +
@@ -178,7 +276,6 @@ function renderPRDetails(data) {
         });
         html += '</tbody></table>';
     }
-
     el.innerHTML = html;
     el.classList.remove('loading-placeholder');
 }
@@ -199,12 +296,12 @@ function renderReviewComments(data) {
             : '<span class="badge badge-stuck">pending</span>';
         var replyInfo = '';
         if (c.latest_reply) {
-            replyInfo = '<small><strong>' + (c.latest_reply_user || '') + ':</strong> ' + c.latest_reply.substring(0, 100) + (c.latest_reply.length > 100 ? '…' : '') + '</small>';
+            replyInfo = '<small><strong>' + (c.latest_reply_user || '') + ':</strong> ' + truncate(c.latest_reply, 100) + '</small>';
         }
         html += '<tr>' +
             '<td><code>' + (c.path || '') + (c.line ? ':' + c.line : '') + '</code></td>' +
             '<td>' + c.user + '</td>' +
-            '<td style="max-width:300px;word-break:break-word;">' + c.body.substring(0, 150) + (c.body.length > 150 ? '…' : '') + '</td>' +
+            '<td style="max-width:300px;word-break:break-word;">' + truncate(c.body, 150) + '</td>' +
             '<td>' + statusBadge + (c.reply_count > 0 ? ' <small>(' + c.reply_count + ' replies)</small>' : '') + (replyInfo ? '<br>' + replyInfo : '') + '</td>' +
             '<td>' + fmtLocalTime(c.created_at) + '</td>' +
             '</tr>';
@@ -214,15 +311,80 @@ function renderReviewComments(data) {
     el.classList.remove('loading-placeholder');
 }
 
-function refreshReviewComments() {
-    if (!PR_NUMBER) return;
-    fetch('/api/pr/' + PR_NUMBER + '/comments')
-        .then(function(r) { return r.ok ? r.json() : null; })
-        .then(function(data) { if (data) renderReviewComments(data); })
-        .catch(function(e) { console.error('Review comments poll error:', e); });
+// Full refresh: execution data, steps, CI runs, PR details, review comments
+function refreshAll() {
+    fetch('/api/execution/' + EXEC_ID)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.execution) return;
+            var ex = data.execution;
+
+            // Update costs
+            document.getElementById('d-prompt').textContent = fmtNum(ex.total_prompt_tokens);
+            document.getElementById('d-completion').textContent = fmtNum(ex.total_completion_tokens);
+            document.getElementById('d-cost').textContent = fmtCost4(ex.total_cost);
+
+            // Update status badge
+            var badge = document.getElementById('d-status-badge');
+            if (badge) {
+                badge.className = 'badge ' + badgeClass(ex.status);
+                badge.textContent = ex.status;
+            }
+
+            // Update current phase
+            var phaseBox = document.getElementById('d-phase-box');
+            if (phaseBox) {
+                if (ex.current_phase) {
+                    phaseBox.innerHTML = '<strong>Current Phase:</strong> <span class="badge badge-running">' + phaseName(ex.current_phase) + '</span>' +
+                        (ex.current_phase_detail ? ' <small>' + ex.current_phase_detail + '</small>' : '');
+                } else {
+                    phaseBox.innerHTML = '';
+                }
+            }
+
+            // Update finished time
+            var fin = document.getElementById('d-finished');
+            if (fin && ex.finished_at) fin.textContent = fmtLocalTime(ex.finished_at);
+
+            // Update PR info dynamically
+            var prBox = document.getElementById('d-pr-box');
+            if (prBox && ex.pr_number && !PR_NUMBER) {
+                PR_NUMBER = ex.pr_number;
+                prBox.innerHTML = '<strong>PR:</strong> <a href="' + ex.pr_url + '" target="_blank">PR #' + ex.pr_number + '</a>';
+                // Also show PR details card
+                var prCard = document.getElementById('pr-details-card');
+                if (!prCard) {
+                    prCard = document.createElement('div');
+                    prCard.className = 'card';
+                    prCard.id = 'pr-details-card';
+                    prCard.innerHTML = '<h2>Pull Request #' + ex.pr_number + '</h2><div id="pr-details-content" class="loading-placeholder">Loading PR details...</div>';
+                    var stepsCard = document.querySelector('#steps-container').closest('.card');
+                    if (stepsCard) stepsCard.parentNode.insertBefore(prCard, stepsCard);
+                }
+            }
+
+            // Update steps
+            renderSteps(data.steps);
+
+            // Update CI runs
+            renderCIRuns(data.ci_runs);
+        })
+        .catch(function(e) { console.error('Poll error:', e); });
+
+    // Refresh PR details and review comments
+    if (PR_NUMBER) {
+        fetch('/api/pr/' + PR_NUMBER)
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) { if (data) renderPRDetails(data); })
+            .catch(function() {});
+        fetch('/api/pr/' + PR_NUMBER + '/comments')
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) { if (data) renderReviewComments(data); })
+            .catch(function() {});
+    }
 }
 
-// Load PR details and review comments on page load if PR exists
+// Initial load of PR details
 if (PR_NUMBER) {
     fetch('/api/pr/' + PR_NUMBER)
         .then(function(r) { return r.ok ? r.json() : null; })
@@ -231,31 +393,13 @@ if (PR_NUMBER) {
             var el = document.getElementById('pr-details-content');
             if (el) el.innerHTML = '<em>Could not load PR details</em>';
         });
-    refreshReviewComments();
+    fetch('/api/pr/' + PR_NUMBER + '/comments')
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(data) { if (data) renderReviewComments(data); })
+        .catch(function() {});
 }
 
-// Poll execution detail + PR details + review comments every 5s
-function refreshDetail() {
-    fetch('/api/execution/' + EXEC_ID)
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (!data.execution) return;
-            var ex = data.execution;
-            document.getElementById('d-prompt').textContent = (ex.total_prompt_tokens || 0).toLocaleString();
-            document.getElementById('d-completion').textContent = (ex.total_completion_tokens || 0).toLocaleString();
-            document.getElementById('d-cost').textContent = '$' + (ex.total_cost || 0).toFixed(4);
-        })
-        .catch(function(e) { console.error('Poll error:', e); });
-
-    if (PR_NUMBER) {
-        fetch('/api/pr/' + PR_NUMBER)
-            .then(function(r) { return r.ok ? r.json() : null; })
-            .then(function(data) { if (data) renderPRDetails(data); })
-            .catch(function() {});
-        refreshReviewComments();
-    }
-}
-
-setInterval(refreshDetail, 5000);
+// Poll everything every 3 seconds for real-time updates
+setInterval(refreshAll, 3000);
 </script>
 {% endblock %}

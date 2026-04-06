@@ -31,7 +31,15 @@
             <strong>Processing:</strong>
             <a href="{{ jira_url }}/browse/{{ running.issue_key }}" target="_blank" class="issue-link">{{ running.issue_key }}</a>
             {% if running.summary %} — {{ running.summary }}{% endif %}
+            <br>
+            <span id="current-phase-display">
+            {% if running.current_phase %}
+                <span class="badge badge-running">{{ running.current_phase }}</span>
+                {% if running.current_phase_detail %}<small> {{ running.current_phase_detail }}</small>{% endif %}
+            {% endif %}
+            </span>
             <br><small>Started: <span data-utc="{{ running.started_at }}">{{ running.started_at }}</span></small>
+            <small> · <a href="/execution/{{ running.id }}">Live Details →</a></small>
         </div>
     </div>
     {% else %}
@@ -140,10 +148,17 @@ function refreshDashboard() {
             if (data.running) {
                 sc.querySelector('.status-box').className = 'status-box active';
                 sc.querySelector('.status-dot').className = 'status-dot active';
+                var phaseHtml = '';
+                if (data.running.current_phase) {
+                    phaseHtml = '<span class="badge badge-running">' + data.running.current_phase + '</span>';
+                    if (data.running.current_phase_detail) phaseHtml += ' <small>' + data.running.current_phase_detail + '</small>';
+                }
                 sc.querySelector('div > div').innerHTML =
                     '<strong>Processing:</strong> <a href="' + JIRA_URL + '/browse/' + data.running.issue_key + '" target="_blank" class="issue-link">' + data.running.issue_key + '</a>' +
                     (data.running.summary ? ' — ' + data.running.summary : '') +
-                    '<br><small>Started: ' + fmtLocalTime(data.running.started_at) + '</small>';
+                    '<br><span id="current-phase-display">' + phaseHtml + '</span>' +
+                    '<br><small>Started: ' + fmtLocalTime(data.running.started_at) + '</small>' +
+                    ' <small>· <a href="/execution/' + data.running.id + '">Live Details →</a></small>';
             } else {
                 sc.querySelector('.status-box').className = 'status-box idle';
                 sc.querySelector('.status-dot').className = 'status-dot idle';

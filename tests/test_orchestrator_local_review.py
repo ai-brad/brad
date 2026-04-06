@@ -42,6 +42,7 @@ def test_handle_local_review_returns_changes_requested(temp_git_repo, monkeypatc
     monkeypatch.setattr(db, "create_step", lambda *args, **kwargs: 1)
     monkeypatch.setattr(db, "finish_step", lambda *args, **kwargs: None)
     monkeypatch.setattr(db, "update_execution_costs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
 
     invoke_local_review = Mock(
         return_value={
@@ -79,6 +80,7 @@ def test_implementation_phase_routes_failed_local_review_into_fix_loop(
             "pr_number": 123,
             "pr_url": "https://github.com/owner/repo/pull/123",
             "_response_id": "resp-1",
+            "_usage": SimpleNamespace(prompt_tokens=100, completion_tokens=50, cached_tokens=0),
         }
     )
     orchestrator.agent.invoke_implementation = invoke_implementation
@@ -86,28 +88,30 @@ def test_implementation_phase_routes_failed_local_review_into_fix_loop(
         return_value=(123, "https://github.com/owner/repo/pull/123")
     )
     orchestrator._verify_and_ensure_pr = verify_and_ensure_pr
-    handle_local_review = Mock(
-        return_value={
-            "action": "changes_requested",
-            "message": "Please add a guard clause",
-        }
-    )
-    orchestrator._handle_local_review = handle_local_review
-    handle_local_review_fix = Mock(return_value=True)
-    orchestrator._handle_local_review_fix = handle_local_review_fix
+    # Mock _run_local_review_loop to return False (changes requested path)
+    run_local_review_loop = Mock(return_value=False)
+    orchestrator._run_local_review_loop = run_local_review_loop
     handle_ci_monitoring = Mock()
     orchestrator._handle_ci_monitoring = handle_ci_monitoring
+    orchestrator._update_pr_metadata = Mock()
 
-    monkeypatch.setattr(orchestrator, "_record_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "create_step", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(db, "finish_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "update_execution_costs", lambda *args, **kwargs: None)
     monkeypatch.setattr(db, "update_execution_pr", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "get_execution_cost", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(db, "get_model_cost", lambda *args, **kwargs: {"prompt": 0.0, "completion": 0.0})
+    monkeypatch.setattr(db, "get_execution", lambda *args, **kwargs: {"started_at": "2025-01-01", "total_cost": 0.0})
 
     orchestrator._handle_implementation_phase(state)
 
-    handle_local_review_fix.assert_called_once_with(state, "Please add a guard clause")
-    handle_ci_monitoring.assert_not_called()
+    run_local_review_loop.assert_called_once_with(state)
+    # PR should still be created and CI monitored even if local review had issues
+    handle_ci_monitoring.assert_called_once_with(state)
 
 
-def test_local_review_fix_reruns_review_and_then_starts_ci(temp_git_repo, monkeypatch):
+def test_local_review_fix_reruns_review_and_then_returns_true(temp_git_repo, monkeypatch):
     orchestrator, _ = make_orchestrator(temp_git_repo)
     state = make_state()
 
@@ -118,6 +122,7 @@ def test_local_review_fix_reruns_review_and_then_starts_ci(temp_git_repo, monkey
             "action": "fixed",
             "message": "Added the missing guard clause",
             "_response_id": "resp-2",
+            "_usage": SimpleNamespace(prompt_tokens=100, completion_tokens=50, cached_tokens=0),
         }
     )
     orchestrator.agent.invoke_local_review_fix = invoke_local_review_fix
@@ -128,23 +133,27 @@ def test_local_review_fix_reruns_review_and_then_starts_ci(temp_git_repo, monkey
         }
     )
     orchestrator._handle_local_review = handle_local_review
-    handle_ci_monitoring = Mock()
-    orchestrator._handle_ci_monitoring = handle_ci_monitoring
 
-    monkeypatch.setattr(orchestrator, "_record_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "create_step", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(db, "finish_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "update_execution_costs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "get_execution_cost", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(db, "get_model_cost", lambda *args, **kwargs: {"prompt": 0.0, "completion": 0.0})
 
     result = orchestrator._handle_local_review_fix(state, "Please add a guard clause")
 
     assert result is True
     assert state.local_review_fix_count == 1
     handle_local_review.assert_called_once_with(state)
-    handle_ci_monitoring.assert_called_once_with(state)
 
 
-def test_local_review_fix_stops_at_iteration_limit(temp_git_repo):
+def test_local_review_fix_stops_at_iteration_limit(temp_git_repo, monkeypatch):
     orchestrator, cfg = make_orchestrator(temp_git_repo)
     state = make_state()
     state.local_review_fix_count = cfg.max_review_fix_iterations
+
+    monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
 
     invoke_local_review_fix = Mock()
     orchestrator.agent.invoke_local_review_fix = invoke_local_review_fix

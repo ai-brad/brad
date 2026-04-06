@@ -7,6 +7,7 @@ review) and parses the LLM output into action dicts.
 """
 
 import re
+import subprocess
 from typing import Dict, List, Optional
 from pathlib import Path
 from brad.logging_config import get_logger
@@ -55,9 +56,11 @@ class AIAgentInterface:
         branch_name: str,
         iteration: int,
         previous_response_id: Optional[str] = None,
+        dev_instructions: str = "",
     ) -> Dict:
         self.logger.info(f"Implementation: {issue_key} (iteration {iteration})")
-        prompt = self._build_implementation_prompt(issue_key, description, attachment_paths, branch_name, iteration)
+        pre_search = self._pre_search_codebase(description, repo_path)
+        prompt = self._build_implementation_prompt(issue_key, description, attachment_paths, branch_name, iteration, pre_search, dev_instructions)
         codebase_map = get_codebase_map(repo_path)
         result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_implementation_response(result.text)
@@ -75,9 +78,10 @@ class AIAgentInterface:
         pr_number: int,
         iteration: int,
         previous_response_id: Optional[str] = None,
+        dev_instructions: str = "",
     ) -> Dict:
         self.logger.info(f"Review fix: {issue_key} PR#{pr_number} (iteration {iteration})")
-        prompt = self._build_review_fix_prompt(issue_key, description, review_comments, pr_number, iteration)
+        prompt = self._build_review_fix_prompt(issue_key, description, review_comments, pr_number, iteration, dev_instructions)
         codebase_map = get_codebase_map(repo_path)
         result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_review_fix_response(result.text)
@@ -97,11 +101,12 @@ class AIAgentInterface:
         iteration: int,
         failed_test_target: Optional[str] = None,
         previous_response_id: Optional[str] = None,
+        dev_instructions: str = "",
     ) -> Dict:
         self.logger.info(f"CI fix: {issue_key} PR#{pr_number} (iteration {iteration})")
         prompt = self._build_ci_fix_prompt(
             issue_key, description, ci_logs, failed_jobs, pr_number, iteration,
-            failed_test_target=failed_test_target,
+            failed_test_target=failed_test_target, dev_instructions=dev_instructions,
         )
         codebase_map = get_codebase_map(repo_path)
         result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
@@ -134,9 +139,10 @@ class AIAgentInterface:
         branch_name: str,
         iteration: int,
         previous_response_id: Optional[str] = None,
+        dev_instructions: str = "",
     ) -> Dict:
         self.logger.info(f"Local review fix: {issue_key} on branch {branch_name} (iteration {iteration})")
-        prompt = self._build_local_review_fix_prompt(issue_key, description, review_feedback, branch_name, iteration)
+        prompt = self._build_local_review_fix_prompt(issue_key, description, review_feedback, branch_name, iteration, dev_instructions)
         codebase_map = get_codebase_map(repo_path)
         result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_local_review_fix_response(result.text)
@@ -161,6 +167,80 @@ class AIAgentInterface:
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
         return parsed
+
+    def invoke_code_review_reader_batch(
+        self,
+        pr_number: int,
+        branch_name: str,
+        comments: List[Dict],
+        repo_path: str,
+        previous_response_id: Optional[str] = None,
+        dev_instructions: str = "",
+    ) -> Dict:
+        """Analyze ALL review comments for a PR in a single LLM call."""
+        self.logger.info(f"Code review reader (batch): PR #{pr_number}, {len(comments)} comments")
+        prompt = self._build_code_review_reader_batch_prompt(pr_number, branch_name, comments, dev_instructions)
+        codebase_map = get_codebase_map(repo_path)
+        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        parsed = self._parse_code_review_reader_batch_response(result.text, comments)
+        parsed["_response_id"] = result.response_id
+        parsed["_usage"] = result.usage
+        return parsed
+
+    # ------------------------------------------------------------------
+    # Pre-search helper
+    # ------------------------------------------------------------------
+    def _pre_search_codebase(self, description: str, repo_path: str) -> str:
+        """Extract key terms from the ticket and run git grep to find relevant files."""
+        # Extract meaningful terms: CamelCase identifiers, UPPER_CASE constants, quoted strings
+        terms = set()
+        # CamelCase / PascalCase identifiers (at least 2 words)
+        for m in re.finditer(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', description):
+            terms.add(m.group(1))
+        # UPPER_CASE_CONSTANTS
+        for m in re.finditer(r'\b([A-Z][A-Z0-9_]{2,})\b', description):
+            terms.add(m.group(1))
+        # Quoted strings (likely identifiers or tag names)
+        for m in re.finditer(r'["\']([a-zA-Z_][a-zA-Z0-9_.]{2,})["\']', description):
+            terms.add(m.group(1))
+        # snake_case identifiers that look like code
+        for m in re.finditer(r'\b([a-z][a-z0-9]*_[a-z0-9_]+)\b', description):
+            if len(m.group(1)) > 4:
+                terms.add(m.group(1))
+
+        if not terms:
+            return ""
+
+        # Limit to most specific terms (longest first, max 8)
+        sorted_terms = sorted(terms, key=len, reverse=True)[:8]
+        self.logger.info(f"Pre-search terms: {sorted_terms}")
+
+        results = []
+        seen_files = set()
+        for term in sorted_terms:
+            try:
+                result = subprocess.run(
+                    ["git", "grep", "-l", "-i", term, "--", "*.py"],
+                    capture_output=True, text=True, timeout=10,
+                    cwd=repo_path, encoding="utf-8", errors="replace",
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    files = result.stdout.strip().splitlines()
+                    new_files = [f for f in files if f not in seen_files][:5]
+                    if new_files:
+                        results.append(f"  '{term}' found in: {', '.join(new_files)}")
+                        seen_files.update(new_files)
+            except Exception:
+                continue
+
+        if not results:
+            return ""
+
+        output = "\n".join(results)
+        if len(output) > 4000:
+            output = output[:4000] + "\n... [truncated]"
+        self.logger.info(f"Pre-search found {len(seen_files)} relevant files")
+        return output
 
     # ------------------------------------------------------------------
     # Prompt builders
@@ -192,12 +272,16 @@ No code references, file names, or technical jargon.
 If requirements are clear and acceptance criteria already exist: respond with "READY TO IMPLEMENT".
 """
 
-    def _build_implementation_prompt(self, issue_key, description, attachment_paths, branch_name, iteration):
+    def _build_implementation_prompt(self, issue_key, description, attachment_paths, branch_name, iteration, pre_search="", dev_instructions=""):
         attachments_text = ""
         if attachment_paths:
             attachments_text = "\n\nAttachments:\n" + "\n".join(
                 f"- {Path(p).name}: {p}" for p in attachment_paths
             )
+
+        pre_search_text = ""
+        if pre_search:
+            pre_search_text = f"\n\nPRE-SEARCH RESULTS (relevant files found by searching the codebase for key terms from the requirements — use these to skip exploration and start implementing faster):\n{pre_search}\n"
 
         return f"""You are Brad, an autonomous software engineer implementing issue {issue_key}.
 
@@ -207,27 +291,39 @@ Iteration: {iteration}
 Requirements:
 {description}
 {attachments_text}
-
+{pre_search_text}
 MANDATORY IMPLEMENTATION STEPS (in order):
 1. Implement the feature according to requirements
-2. Write tests (unit tests mandatory, integration tests if needed)
-3. Run relevant tests locally to verify — try to fix failures but do NOT get stuck on environment issues
+2. Write tests appropriate for the change type:
+   - **Backend logic**: unit tests in tests/unit/ (mandatory)
+   - **API endpoints**: integration tests exercising the endpoint
+   - **UI/frontend templates**: template rendering tests (verify HTML output contains expected elements)
+   - **Database changes**: migration tests and data integrity tests
+   - **Configuration**: config validation tests
+3. Run ONLY the relevant tests locally to verify — try to fix failures but do NOT get stuck on environment issues
 4. Commit ALL changes with message: "{issue_key}: <concise description>"
 5. Push the branch to origin: `git push origin {branch_name}`
 6. Create a pull request against main using: `gh pr create --base main --head {branch_name} --title "Brad: {issue_key}: <summary>" --body "<description>"`
 
-Important:
+CRITICAL EFFICIENCY RULES (cost budget is limited):
+- Use the pre-search results above to go directly to the relevant files — do NOT do broad exploratory searches
+- Use `multi_edit_file` to batch ALL edits to multiple files in a single call instead of editing files one by one
 - Follow existing code style exactly
 - DO NOT create utility files like *_ACCEPTANCE_CRITERIA.md, *_PROGRESS.md, etc.
 - On Windows, set environment variables with `set VAR=value && command` (not Unix VAR=value syntax)
 - ALWAYS commit, push, and create PR even if local tests have minor issues — the CI pipeline is the real test authority
-
+- MINIMIZE iterations: read files in batches, edit files in batches, think before acting
+- DO NOT re-read files you have already read unless they changed
+{f"""
+REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
+{dev_instructions}
+""" if dev_instructions else ""}
 After completing the work, respond with a status update that MUST include the PR URL:
 - If PR CREATED: include the PR number and URL, e.g. "Created PR #123: https://github.com/.../pull/123"
 - If STUCK and unable to create PR: clearly state what blocked you
 """
 
-    def _build_ci_fix_prompt(self, issue_key, description, ci_logs, failed_jobs, pr_number, iteration, failed_test_target=None):
+    def _build_ci_fix_prompt(self, issue_key, description, ci_logs, failed_jobs, pr_number, iteration, failed_test_target=None, dev_instructions=""):
         if failed_test_target:
             test_instruction = (
                 f"3. Re-run ONLY the previously failing tests to verify your fix:\n"
@@ -260,9 +356,12 @@ MANDATORY STEPS:
 5. Push changes: `git push origin {issue_key}`
 
 After fixing, respond with status. If FIXED: state what was wrong and changed. If STUCK: explain why.
-"""
+{f"""
+REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
+{dev_instructions}
+""" if dev_instructions else ""}"""
 
-    def _build_review_fix_prompt(self, issue_key, description, review_comments, pr_number, iteration):
+    def _build_review_fix_prompt(self, issue_key, description, review_comments, pr_number, iteration, dev_instructions=""):
         comments_text = ""
         for i, comment in enumerate(review_comments, 1):
             path = comment.get('path', 'N/A')
@@ -289,7 +388,10 @@ MANDATORY STEPS:
 5. Push changes: `git push origin {issue_key}`
 
 After addressing comments, respond with status. Address ALL review comments, not just some.
-"""
+{f"""
+REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
+{dev_instructions}
+""" if dev_instructions else ""}"""
 
     def _build_code_review_reader_prompt(self, pr_number, branch_name, comment):
         file_path = comment.get('path', 'N/A')
@@ -332,7 +434,62 @@ After completing your action, respond with ONE of these:
 - "STUCK: <reason>" — if you cannot resolve this
 """
 
-    def _build_local_review_fix_prompt(self, issue_key, description, review_feedback, branch_name, iteration):
+    def _build_code_review_reader_batch_prompt(self, pr_number, branch_name, comments, dev_instructions=""):
+        comments_section = ""
+        for i, comment in enumerate(comments, 1):
+            file_path = comment.get('path', 'N/A')
+            line = comment.get('line', comment.get('original_line', 'N/A'))
+            body = comment.get('body', '')
+            reviewer = comment.get('user', {}).get('login', 'unknown')
+            diff_hunk = comment.get('diff_hunk', '')
+            comment_id = comment.get('id', 'unknown')
+            comments_section += f"\n--- COMMENT {i} (id={comment_id}) ---\n"
+            comments_section += f"Reviewer: {reviewer}\n"
+            comments_section += f"File: {file_path}:{line}\n"
+            comments_section += f"Comment: {body}\n"
+            comments_section += f"Diff context:\n{diff_hunk}\n"
+
+        return f"""You are Brad, an autonomous software engineer analyzing {len(comments)} code review comments on PR #{pr_number}.
+
+Branch: {branch_name}
+
+Review Comments:
+{comments_section}
+
+ANALYSIS INSTRUCTIONS:
+1. Read ALL comments carefully
+2. Examine each referenced file to understand the full context
+3. For each comment, determine its category:
+   a) LEGITIMATE BUG/ISSUE - needs a code fix
+   b) VALID SUGGESTION - worth making
+   c) STYLE/NITPICK - acknowledge but not necessarily change
+   d) QUESTION - reply with explanation
+   e) INCORRECT/INVALID - explain why current code is correct
+   f) TEST/VERIFICATION REQUEST - reviewer asks to run tests or provide evidence
+
+ACTION RULES:
+- For (a) and (b): Fix the code. Batch all fixes before running tests.
+- For (c): If trivial, make the change. If opinionated, just reply.
+- For (d) and (e): Reply only.
+- For (f): Actually RUN the requested tests/commands and paste the output as your reply. Do not just say you cannot — use the run_command tool.
+- Run tests ONCE after all code changes, not after each individual fix.
+- Commit all changes in a single commit.
+
+RESPONSE FORMAT — you MUST respond with a result for EACH comment using this exact format:
+
+COMMENT <id>: CODE_CHANGED: <summary>
+or
+COMMENT <id>: REPLIED: <reply text>
+or
+COMMENT <id>: STUCK: <reason>
+
+List ALL {len(comments)} comments in your response, one per line.
+{f"""
+REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
+{dev_instructions}
+""" if dev_instructions else ""}"""
+
+    def _build_local_review_fix_prompt(self, issue_key, description, review_feedback, branch_name, iteration, dev_instructions=""):
         return f"""You are Brad, addressing local code review feedback for issue {issue_key}.
 
 Branch: {branch_name}
@@ -354,7 +511,10 @@ MANDATORY STEPS:
 After addressing the feedback, respond with ONE of these:
 - "FIXED: <summary of what was changed>" — if you updated the code
 - "STUCK: <reason>" — if you cannot resolve the feedback
-"""
+{f"""
+REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
+{dev_instructions}
+""" if dev_instructions else ""}"""
 
     def _build_local_review_prompt(self, issue_key, description, diff, branch_name):
         return f"""You are a senior code reviewer. Review the following changes for issue {issue_key}.
@@ -468,6 +628,39 @@ b) "CHANGES REQUESTED:" - if there are issues (list each with file path)
             return {"action": "stuck", "message": output, "reply": ""}
         self.logger.info("Code review reader: defaulting to replied")
         return {"action": "replied", "message": output, "reply": output[:500]}
+
+    def _parse_code_review_reader_batch_response(self, output: str, comments: List[Dict]) -> Dict:
+        """Parse batch review response. Extract per-comment results."""
+        comment_results = []
+        comment_ids = [c.get('id') for c in comments]
+
+        for comment in comments:
+            cid = comment.get('id')
+            # Try to find a line matching "COMMENT <id>: <ACTION>: <text>"
+            pattern = re.compile(
+                rf'COMMENT\s+{re.escape(str(cid))}\s*:\s*(CODE_CHANGED|REPLIED|STUCK)\s*:\s*(.*)',
+                re.IGNORECASE
+            )
+            match = pattern.search(output)
+            if match:
+                action_str = match.group(1).lower()
+                reply_text = match.group(2).strip()
+                comment_results.append({
+                    'comment_id': cid,
+                    'action': action_str,
+                    'reply': reply_text,
+                })
+            else:
+                # Fallback: try to infer from overall output
+                self.logger.warning(f"Could not parse result for comment {cid}, defaulting to replied")
+                comment_results.append({
+                    'comment_id': cid,
+                    'action': 'replied',
+                    'reply': f"Brad reviewed this comment. See latest changes on the PR.",
+                })
+
+        self.logger.info(f"Code review reader batch: {len(comment_results)} results parsed")
+        return {'comment_results': comment_results, 'message': output}
 
     def _parse_local_review_response(self, output: str) -> Dict:
         output_lower = output.lower()
