@@ -203,10 +203,10 @@ def record_ci_run(execution_id: int, run_id: Optional[int], workflow_name: str, 
 # -------------------------
 
 def get_all_executions(limit: int = 100) -> List[Dict]:
-    """Get all executions ordered by most recent first."""
+    """Get all executions ordered by most recent update first (finished_at if available, otherwise started_at)."""
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM executions ORDER BY started_at DESC LIMIT ?",
+            "SELECT *, COALESCE(finished_at, started_at) as last_update FROM executions ORDER BY last_update DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -295,6 +295,26 @@ def get_running_execution() -> Optional[Dict]:
             "SELECT * FROM executions WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
         ).fetchone()
         return dict(row) if row else None
+
+
+def has_ongoing_work_for_pr(pr_number: int) -> bool:
+    """Check if there's currently running work for this PR."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM executions WHERE pr_number = ? AND status = 'running' LIMIT 1",
+            (pr_number,),
+        ).fetchone()
+        return row is not None
+
+
+def pr_belongs_to_brad(pr_number: int) -> bool:
+    """Check if a PR was created by this Brad instance (exists in DB)."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM executions WHERE pr_number = ? LIMIT 1",
+            (pr_number,),
+        ).fetchone()
+        return row is not None
 
 
 # -------------------------

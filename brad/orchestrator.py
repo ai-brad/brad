@@ -251,21 +251,28 @@ class BradOrchestrator:
         for pr_info in brad_prs:
             pr_number = pr_info["pr_number"]
             issue_key = pr_info["issue_key"]
+            
             try:
-                result = self.code_repo.rebase_pr(pr_number)
+                pr = self.code_repo.get_pr(pr_number)
+                branch_name = pr.get('head', {}).get('ref', '')
+                if not branch_name:
+                    self.logger.warning(f"PR #{pr_number} ({issue_key}) has no branch name")
+                    continue
+                    
+                result = self.repo.rebase_branch(branch_name, base_branch="main")
                 if result.get("rebased"):
                     self.logger.info(f"Rebased PR #{pr_number} ({issue_key})")
                 elif result.get("up_to_date"):
                     self.logger.debug(f"PR #{pr_number} ({issue_key}) already up to date")
                 elif result.get("conflict"):
-                    self.logger.warning(f"PR #{pr_number} ({issue_key}) has merge conflicts, skipping")
+                    self.logger.warning(f"PR #{pr_number} ({issue_key}) has rebase conflicts, skipping")
                 elif result.get("error"):
                     self.logger.warning(f"PR #{pr_number} ({issue_key}) rebase error: {result['error']}")
             except Exception as e:
                 self.logger.warning(f"Failed to rebase PR #{pr_number} ({issue_key}): {e}")
 
     def _process_review_comments(self):
-        """Check all Brad PRs for new review comments and process them."""
+        """Check all Brad PRs for new review comments (both file-level and PR-level) and process them."""
         brad_prs = self.code_repo.get_brad_prs()
         if not brad_prs:
             return
@@ -274,11 +281,19 @@ class BradOrchestrator:
             pr_number = pr['number']
             branch_name = pr['head']['ref']
 
-            comments = self.code_repo.get_review_comments_needing_response(pr_number)
-            if not comments:
+            # Fetch all three types of comments:
+            # 1. Line-specific review comments
+            # 2. General review-level comments (review body, not tied to lines)
+            # 3. Issue comments (PR-level general comments)
+            review_comments = self.code_repo.get_review_comments_needing_response(pr_number)
+            review_level_comments = self.code_repo.get_review_level_comments_needing_response(pr_number)
+            issue_comments = self.code_repo.get_issue_comments_needing_response(pr_number)
+            
+            total_comments = len(review_comments) + len(review_level_comments) + len(issue_comments)
+            if total_comments == 0:
                 continue
 
-            self.logger.info(f"Found {len(comments)} unresponded comments on PR #{pr_number}")
+            self.logger.info(f"Found {len(review_comments)} review comments, {len(review_level_comments)} review-level comments, and {len(issue_comments)} issue comments on PR #{pr_number}")
 
             # Fail-fast: check branch existence ONCE before processing any comments
             try:
@@ -286,11 +301,20 @@ class BradOrchestrator:
                 self.repo._run_git("fetch", "origin", branch_name, check=False)
                 self.repo._run_git("reset", "--hard", f"origin/{branch_name}", check=False)
             except Exception as e:
-                self.logger.warning(f"PR #{pr_number}: Skipping all {len(comments)} comments — branch '{branch_name}' unavailable: {e}")
+                self.logger.warning(f"PR #{pr_number}: Skipping all {total_comments} comments — branch '{branch_name}' unavailable: {e}")
                 continue
 
-            # Branch is ready — batch all comments into a single LLM call
-            self._process_review_comments_batch(pr_number, branch_name, comments)
+            # Process review comments (file/line-specific)
+            if review_comments:
+                self._process_review_comments_batch(pr_number, branch_name, review_comments)
+            
+            # Process review-level comments (general review body, not tied to lines)
+            if review_level_comments:
+                self._process_issue_comments_batch(pr_number, branch_name, review_level_comments)
+            
+            # Process issue comments (PR-level general comments)
+            if issue_comments:
+                self._process_issue_comments_batch(pr_number, branch_name, issue_comments)
 
     def _process_review_comments_batch(self, pr_number: int, branch_name: str, comments: List[Dict]):
         """Process all review comments for a PR in a single LLM call."""
@@ -301,19 +325,24 @@ class BradOrchestrator:
             except Exception as e:
                 self.logger.warning(f"Failed to claim comment {comment['id']}: {e}")
 
-        # Single batched LLM call for all comments
-        result = self.agent.invoke_code_review_reader_batch(
-            pr_number=pr_number,
-            branch_name=branch_name,
-            comments=comments,
-            repo_path=str(self.repo.repo_path),
-            dev_instructions=self._repo_dev_instructions,
+        # Enrich comments with their reply threads for full context
+        enriched_comments = []
+        for comment in comments:
+            replies = self.code_repo.get_comment_replies(pr_number, comment['id'])
+            # Filter out Brad's own "checking..." and final response messages from context
+            non_brad_replies = [r for r in replies if not (
+                r.get('body', '').startswith('Brad reaction: ') or 
+                r.get('body', '').startswith('Brad checking')
+            )]
+            enriched = comment.copy()
+            enriched['_thread_replies'] = non_brad_replies
+            enriched_comments.append(enriched)
+
+        comment_results, overall_code_changed = self._invoke_and_verify_batch(
+            pr_number, branch_name, enriched_comments,
         )
 
-        # Process results for each comment
-        comment_results = result.get('comment_results', [])
-        overall_code_changed = False
-
+        # Post replies for each comment
         for cr in comment_results:
             comment_id = cr.get('comment_id')
             action = cr.get('action')
@@ -323,7 +352,6 @@ class BradOrchestrator:
                 continue
 
             if action == 'code_changed':
-                overall_code_changed = True
                 prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Fixed in latest push."
                 self.code_repo.reply_to_review_comment(pr_number, comment_id, prefixed)
             elif action == 'replied':
@@ -335,7 +363,131 @@ class BradOrchestrator:
                 prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Acknowledged."
                 self.code_repo.reply_to_review_comment(pr_number, comment_id, prefixed)
 
-        # Push once if any comment led to code changes
+        # Push once if verified changes exist
+        if overall_code_changed:
+            try:
+                self.repo.push(branch_name, force=False)
+            except Exception:
+                try:
+                    self.repo.push(branch_name, force=True)
+                except Exception as e:
+                    self.logger.error(f"Failed to push changes for PR #{pr_number}: {e}")
+
+    def _get_pr_diff(self, branch_name: str) -> str:
+        """Get the diff of the current branch against main."""
+        try:
+            result = self.repo._run_git("diff", "origin/main...HEAD", "--stat", "-p", check=False)
+            return result.stdout if result.stdout else ""
+        except Exception as e:
+            self.logger.warning(f"Failed to get PR diff for {branch_name}: {e}")
+            return ""
+
+    def _invoke_and_verify_batch(self, pr_number: int, branch_name: str, comments: List[Dict], attempt: int = 1) -> tuple:
+        """Invoke batch review reader and verify actual changes. Retry once if agent hallucinates CODE_CHANGED."""
+        MAX_ATTEMPTS = 2
+
+        # Get PR diff to give agent full context of what changed
+        pr_diff = self._get_pr_diff(branch_name) if attempt == 1 else ""
+
+        result = self.agent.invoke_code_review_reader_batch(
+            pr_number=pr_number,
+            branch_name=branch_name,
+            comments=comments,
+            repo_path=str(self.repo.repo_path),
+            dev_instructions=self._repo_dev_instructions,
+            pr_diff=pr_diff,
+        )
+
+        comment_results = result.get('comment_results', [])
+        overall_code_changed = any(cr.get('action') == 'code_changed' for cr in comment_results)
+
+        if overall_code_changed:
+            has_actual = self._has_uncommitted_or_new_commits(branch_name)
+            if not has_actual and attempt < MAX_ATTEMPTS:
+                self.logger.warning(
+                    f"PR #{pr_number}: Agent claimed CODE_CHANGED on attempt {attempt} but no changes found. "
+                    f"Retrying with explicit instructions..."
+                )
+                # Inject a retry hint into comments so the prompt changes
+                for c in comments:
+                    c['_retry_hint'] = (
+                        "PREVIOUS ATTEMPT FAILED: You said CODE_CHANGED but made NO actual file edits. "
+                        "You MUST use edit_file or write_file tools to ACTUALLY modify files before returning CODE_CHANGED. "
+                        "If you return CODE_CHANGED again without using edit_file/write_file, it will be detected as a failure."
+                    )
+                return self._invoke_and_verify_batch(pr_number, branch_name, comments, attempt + 1)
+            elif not has_actual:
+                self.logger.error(f"PR #{pr_number}: Agent claimed CODE_CHANGED after {attempt} attempts but still no changes!")
+                overall_code_changed = False
+
+        return comment_results, overall_code_changed
+
+    def _has_uncommitted_or_new_commits(self, branch_name: str) -> bool:
+        """Check if there are uncommitted changes or new commits not yet pushed.
+        If uncommitted changes exist, auto-commit them (agent may have forgotten)."""
+        try:
+            # Check for uncommitted changes
+            result = self.repo._run_git("status", "--porcelain")
+            if result.stdout.strip():
+                self.logger.info(f"Found uncommitted changes on {branch_name}, auto-committing...")
+                self.repo._run_git("add", "-A")
+                self.repo._run_git("commit", "-m", f"Brad: address review comments on {branch_name}")
+                return True
+            # Check for unpushed commits
+            result = self.repo._run_git("log", f"origin/{branch_name}..HEAD", "--oneline", check=False)
+            if result.stdout.strip():
+                return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Error checking for changes on {branch_name}: {e}")
+            return False
+
+    def _process_issue_comments_batch(self, pr_number: int, branch_name: str, comments: List[Dict]):
+        """Process all PR-level issue comments in a single LLM call."""
+        # Claim all comments first by replying
+        for comment in comments:
+            try:
+                self.code_repo.reply_to_issue_comment(pr_number, comment['id'], "Brad checking...")
+            except Exception as e:
+                self.logger.warning(f"Failed to claim issue comment {comment['id']}: {e}")
+
+        # Convert issue comments to the same format as review comments for batched processing
+        # Issue comments don't have file/line context, but we can still batch them
+        enriched_comments = []
+        for comment in comments:
+            enriched = comment.copy()
+            enriched['path'] = 'N/A'
+            enriched['line'] = 'N/A'
+            enriched['diff_hunk'] = ''
+            enriched['_thread_replies'] = []
+            enriched_comments.append(enriched)
+
+        comment_results, overall_code_changed = self._invoke_and_verify_batch(
+            pr_number, branch_name, enriched_comments,
+        )
+
+        # Post replies for each comment
+        for cr in comment_results:
+            comment_id = cr.get('comment_id')
+            action = cr.get('action')
+            reply_text = cr.get('reply', '')
+
+            if not comment_id:
+                continue
+
+            if action == 'code_changed':
+                prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Fixed in latest push."
+                self.code_repo.reply_to_issue_comment(pr_number, comment_id, prefixed)
+            elif action == 'replied':
+                prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Acknowledged."
+                self.code_repo.reply_to_issue_comment(pr_number, comment_id, prefixed)
+            elif action == 'error':
+                self.logger.error(f"Issue comment {comment_id}: {cr.get('message', 'Unknown error')}")
+            else:
+                prefixed = f"Brad reaction: {reply_text}" if reply_text else "Brad reaction: Acknowledged."
+                self.code_repo.reply_to_issue_comment(pr_number, comment_id, prefixed)
+
+        # Push once if verified changes exist
         if overall_code_changed:
             try:
                 self.repo.push(branch_name, force=False)
@@ -521,6 +673,11 @@ class BradOrchestrator:
             if action == "stuck":
                 self._set_phase(state, "stuck", "Implementation could not complete")
                 self.ticketing.comment(state.issue_key, f"Brad is stuck during implementation:\n\n{message}")
+            elif action == "in_progress":
+                # Agent returned without completing - this means it didn't create a PR yet
+                # Treat this as stuck since we don't have multi-turn implementation support
+                self._set_phase(state, "stuck", "Implementation incomplete - no PR created")
+                self.ticketing.comment(state.issue_key, f"Brad did not complete the implementation. No PR was created.\n\nLast message:\n{message}\n\nThis likely means Brad finished early without actually modifying code. Please review the logs.")
             else:
                 self._set_phase(state, "error", "Implementation error")
                 self.ticketing.comment(state.issue_key, f"Brad encountered an error during implementation:\n\n{message}\n\nBrad is stuck.")

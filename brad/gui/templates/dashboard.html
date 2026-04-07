@@ -79,7 +79,7 @@
                 <th>Issue</th>
                 <th>Summary</th>
                 <th>Status</th>
-                <th>Started</th>
+                <th>Last update</th>
                 <th>PR</th>
                 <th>Cost</th>
                 <th></th>
@@ -93,7 +93,7 @@
                 <td>
                     <span class="badge badge-{{ ex.status }}">{{ ex.status }}</span>
                 </td>
-                <td><span data-utc="{{ ex.started_at }}">{{ ex.started_at[:16] }}</span></td>
+                <td><span data-utc="{{ ex.last_update }}">{{ ex.last_update[:16] }}</span></td>
                 <td>
                     {% if ex.pr_url %}
                     <a href="{{ ex.pr_url }}" target="_blank">PR #{{ ex.pr_number }}</a>
@@ -176,7 +176,7 @@ function refreshDashboard() {
                         '<td><a href="' + JIRA_URL + '/browse/' + ex.issue_key + '" target="_blank" class="issue-link"><strong>' + ex.issue_key + '</strong></a></td>' +
                         '<td>' + truncate(ex.summary, 60) + '</td>' +
                         '<td><span class="badge ' + badgeClass(ex.status) + '">' + ex.status + '</span></td>' +
-                        '<td>' + fmtLocalTime(ex.started_at) + '</td>' +
+                        '<td>' + fmtLocalTime(ex.last_update) + '</td>' +
                         '<td>' + prCell + '</td>' +
                         '<td class="cost">' + fmtCost4(ex.total_cost) + '</td>' +
                         '<td><a href="/execution/' + ex.id + '">Details →</a></td>' +

@@ -184,6 +184,71 @@ class RepoManager:
             result = self._run_git("rev-parse", "--short", branch, check=False)
         return result.stdout.strip() or "unknown"
 
+    def rebase_branch(self, branch_name: str, base_branch: str = "main") -> dict:
+        """Rebase the given branch onto the latest base branch.
+        
+        Returns a dict with:
+        - 'rebased': True if branch was rebased
+        - 'up_to_date': True if already up to date
+        - 'conflict': True if rebase conflicts occurred
+        - 'error': error message if something else went wrong
+        """
+        self.logger.info(f"Attempting to rebase branch '{branch_name}' onto '{base_branch}'")
+        
+        try:
+            # Fetch latest
+            self._run_git("fetch", "origin")
+            
+            # Check if branch exists locally
+            existing_branches = self._run_git("branch", check=False).stdout
+            if branch_name not in existing_branches:
+                # Fetch the remote branch
+                self._run_git("fetch", "origin", branch_name)
+                self._run_git("checkout", "-b", branch_name, f"origin/{branch_name}")
+            else:
+                self._run_git("checkout", branch_name)
+            
+            # Get current commit and base commit
+            result = self._run_git("rev-parse", "HEAD", check=False)
+            current_sha = result.stdout.strip()
+            
+            result = self._run_git("rev-parse", f"origin/{base_branch}", check=False)
+            base_sha = result.stdout.strip()
+            
+            # Check if already up to date by seeing if base is an ancestor
+            result = self._run_git("merge-base", "--is-ancestor", f"origin/{base_branch}", "HEAD", check=False)
+            if result.returncode == 0:
+                self.logger.info(f"Branch '{branch_name}' is already up to date with {base_branch}")
+                return {"rebased": False, "up_to_date": True}
+            
+            # Attempt rebase
+            self.logger.info(f"Rebasing '{branch_name}' onto 'origin/{base_branch}'")
+            result = self._run_git("rebase", f"origin/{base_branch}", check=False)
+            
+            if result.returncode == 0:
+                self.logger.info(f"Successfully rebased '{branch_name}'")
+                # Push with force since history changed
+                push_result = self._run_git("push", "origin", branch_name, "--force-with-lease", check=False)
+                if push_result.returncode != 0:
+                    self.logger.warning(f"Rebase succeeded but push failed: {push_result.stderr}")
+                return {"rebased": True}
+            else:
+                # Check if it's a conflict
+                if "conflict" in result.stdout.lower() or "conflict" in result.stderr.lower():
+                    self.logger.warning(f"Rebase conflicts on '{branch_name}'")
+                    self._run_git("rebase", "--abort", check=False)
+                    return {"rebased": False, "conflict": True}
+                else:
+                    self.logger.error(f"Rebase failed: {result.stderr}")
+                    self._run_git("rebase", "--abort", check=False)
+                    return {"rebased": False, "error": result.stderr}
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to rebase branch '{branch_name}': {e}")
+            # Try to abort any in-progress rebase
+            self._run_git("rebase", "--abort", check=False)
+            return {"rebased": False, "error": str(e)}
+
     def reset_to_clean_state(self, branch: str = "main"):
         """Reset repository to clean state on specified branch."""
         self.logger.info(f"Resetting to clean state on {branch}")

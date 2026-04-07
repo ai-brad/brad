@@ -4,6 +4,7 @@ import requests
 from typing import List, Dict, Optional
 from brad.adapters.code_repository.base import CodeRepositoryAdapter
 from brad.logging_config import get_logger
+from brad import db
 
 
 class GitHubAdapter(CodeRepositoryAdapter):
@@ -156,7 +157,9 @@ class GitHubAdapter(CodeRepositoryAdapter):
 
         A thread needs a response when:
         - It has no Brad reply at all, OR
-        - The LAST reply in the thread is NOT from Brad (a human replied after Brad).
+        - The LAST reply in the thread is NOT from Brad (a human replied after Brad), OR
+        - The LAST reply is ONLY "Brad reaction: checking..." AND this PR belongs to Brad AND there's no ongoing work
+          (indicating Brad was interrupted and should resume)
         """
         self.logger.debug(f"Checking PR #{pr_number} for unresponded review comments")
         try:
@@ -164,6 +167,11 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.info(f"PR #{pr_number}: Found {len(all_comments)} total review comments")
 
             _BRAD_PREFIXES = ('Brad reaction: ', 'Brad checking')
+            _CHECKING_MESSAGE = 'Brad reaction: checking...'
+
+            # Check PR ownership and ongoing work status
+            pr_belongs_to_brad = db.pr_belongs_to_brad(pr_number)
+            has_ongoing_work = db.has_ongoing_work_for_pr(pr_number)
 
             # Group: top-level comments and replies per parent
             top_level = []
@@ -186,11 +194,64 @@ class GitHubAdapter(CodeRepositoryAdapter):
                     self.logger.debug(f"Comment {comment_id} is Brad's own response - skipping")
                     continue
 
-                # Check the LAST reply in the thread
+                # Check the thread conversation
                 thread_replies = replies_by_parent.get(comment_id, [])
                 if thread_replies:
                     last_reply_body = thread_replies[-1].get('body', '')
                     brad_spoke_last = any(last_reply_body.startswith(p) for p in _BRAD_PREFIXES)
+                    
+                    # Detect interrupted work: last reply is ONLY the checking message
+                    is_interrupted_work = (
+                        last_reply_body == _CHECKING_MESSAGE and
+                        pr_belongs_to_brad and
+                        not has_ongoing_work
+                    )
+                    
+                    if is_interrupted_work:
+                        self.logger.info(f"Comment {comment_id} — INTERRUPTED WORK detected (checking message, Brad's PR, no ongoing work) — RESUMING")
+                        needs_response.append(comment)
+                        continue
+                    
+                    # Detect ongoing conversation: find all Brad substantive responses
+                    brad_substantive_indices = []
+                    for i, reply in enumerate(thread_replies):
+                        reply_body = reply.get('body', '')
+                        if any(reply_body.startswith(p) for p in _BRAD_PREFIXES) and reply_body != _CHECKING_MESSAGE:
+                            brad_substantive_indices.append(i)
+                    
+                    # If Brad has replied substantively, check if there are human replies after the SECOND-TO-LAST Brad response
+                    # This catches cases where Brad replied, human objected, and Brad needs to try again
+                    if len(brad_substantive_indices) >= 2:
+                        second_to_last_brad_idx = brad_substantive_indices[-2]
+                        last_brad_idx = brad_substantive_indices[-1]
+                        
+                        # Check if there's a human reply between the second-to-last and last Brad responses
+                        human_replied_between = False
+                        for i in range(second_to_last_brad_idx + 1, last_brad_idx):
+                            reply_body = thread_replies[i].get('body', '')
+                            if not any(reply_body.startswith(p) for p in _BRAD_PREFIXES):
+                                human_replied_between = True
+                                break
+                        
+                        if human_replied_between:
+                            # There was a back-and-forth - check if the last Brad response might have missed a rework request
+                            # by seeing if it was just a reply without indication of code changes
+                            last_brad_body = thread_replies[last_brad_idx].get('body', '')
+                            # If the response doesn't mention fixing/changing code, Brad might have misunderstood
+                            if not any(keyword in last_brad_body.lower() for keyword in ['fixed', 'changed', 'updated', 'committed', 'push']):
+                                self.logger.info(f"Comment {comment_id} — Back-and-forth detected, last Brad response appears to be explanation-only — RE-ENGAGING")
+                                needs_response.append(comment)
+                                continue
+                    
+                    # Also check if Brad's LAST response explicitly indicates incomplete work
+                    if len(brad_substantive_indices) >= 1:
+                        last_brad_idx = brad_substantive_indices[-1]
+                        last_brad_body = thread_replies[last_brad_idx].get('body', '')
+                        incomplete_phrases = ['have not yet', 'will do', 'need to', 'should', 'plan to', 'intend to']
+                        if any(phrase in last_brad_body.lower() for phrase in incomplete_phrases):
+                            self.logger.info(f"Comment {comment_id} — Brad's last response indicates INCOMPLETE work — RE-ENGAGING to finish")
+                            needs_response.append(comment)
+                            continue
                 else:
                     brad_spoke_last = False
 
@@ -412,4 +473,175 @@ class GitHubAdapter(CodeRepositoryAdapter):
             ]
         except Exception as e:
             self.logger.error(f"Failed to get checks for PR #{pr_number}: {e}")
+            return []
+
+    def fetch_issue_comments(self, pr_number: int) -> List[Dict]:
+        """Fetch all general issue comments on a PR (not review comments)."""
+        try:
+            return self._fetch_all_pages(f"{self.base_url}/issues/{pr_number}/comments")
+        except Exception as e:
+            self.logger.error(f"Failed to fetch issue comments for PR #{pr_number}: {e}")
+            return []
+
+    def get_issue_comments_needing_response(self, pr_number: int) -> List[Dict]:
+        """Get issue comments that haven't been responded to by Brad.
+        
+        For issue comments (PR-level comments without file/line context),
+        we check if there's a Brad response AFTER each human comment.
+        """
+        self.logger.debug(f"Checking PR #{pr_number} for unresponded issue comments")
+        try:
+            all_comments = self.fetch_issue_comments(pr_number)
+            self.logger.info(f"PR #{pr_number}: Found {len(all_comments)} total issue comments")
+
+            _BRAD_PREFIXES = ('Brad reaction: ', 'Brad checking')
+            _BOT_SUFFIXES = ('[bot]',)
+            
+            needs_response = []
+            
+            # Sort comments by created_at to ensure chronological order
+            sorted_comments = sorted(all_comments, key=lambda c: c.get('created_at', ''))
+            
+            for i, comment in enumerate(sorted_comments):
+                comment_id = comment['id']
+                comment_author = comment.get('user', {}).get('login', 'unknown')
+                comment_body = comment.get('body', '')
+
+                # Skip bot comments
+                if any(comment_author.endswith(s) for s in _BOT_SUFFIXES):
+                    self.logger.debug(f"Issue comment {comment_id} by bot '{comment_author}' - skipping")
+                    continue
+
+                # Skip if comment itself is from Brad
+                if any(comment_body.startswith(p) for p in _BRAD_PREFIXES):
+                    self.logger.debug(f"Issue comment {comment_id} is Brad's own response - skipping")
+                    continue
+
+                # Check if there's a Brad response after this comment
+                brad_responded = False
+                for j in range(i + 1, len(sorted_comments)):
+                    next_comment = sorted_comments[j]
+                    next_body = next_comment.get('body', '')
+                    if any(next_body.startswith(p) for p in _BRAD_PREFIXES):
+                        brad_responded = True
+                        break
+                    # If we hit another human comment before a Brad response, stop looking
+                    if not any(next_body.startswith(p) for p in _BRAD_PREFIXES):
+                        break
+                
+                if not brad_responded:
+                    self.logger.info(f"Issue comment {comment_id} by {comment_author} NEEDS response: {comment_body[:100]}...")
+                    needs_response.append(comment)
+                else:
+                    self.logger.debug(f"Issue comment {comment_id} already has Brad response - skipping")
+
+            self.logger.info(f"PR #{pr_number}: {len(needs_response)} issue comments need response")
+            return needs_response
+        except Exception as e:
+            self.logger.error(f"Failed to get issue comments needing response: {e}")
+            return []
+
+    def delete_issue_comment(self, comment_id: int) -> bool:
+        """Delete an issue comment by ID."""
+        self.logger.info(f"Deleting issue comment {comment_id}")
+        try:
+            resp = self._request_with_retry(
+                "delete",
+                f"{self.base_url}/issues/comments/{comment_id}",
+            )
+            return resp.status_code == 204
+        except Exception as e:
+            self.logger.error(f"Failed to delete comment {comment_id}: {e}")
+            return False
+
+    def reply_to_issue_comment(self, pr_number: int, comment_id: int, body: str) -> Dict:
+        """Reply to a specific issue comment (general PR comment)."""
+        self.logger.info(f"Replying to issue comment {comment_id} on PR #{pr_number}")
+        try:
+            payload = {"body": body}
+            resp = self._request_with_retry(
+                "post",
+                f"{self.base_url}/issues/{pr_number}/comments",
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            self.logger.error(f"Failed to reply to issue comment: {e}")
+            raise
+
+    def get_review_level_comments_needing_response(self, pr_number: int) -> List[Dict]:
+        """Get general PR review comments (review body, not line-specific) that need response.
+        
+        These are comments submitted as part of a PR review but not tied to specific lines.
+        Filters out bot reviews (e.g., windsurf-bot, github-actions[bot]).
+        """
+        self.logger.debug(f"Checking PR #{pr_number} for unresponded review-level comments")
+        try:
+            resp = self._request_with_retry(
+                "get",
+                f"{self.base_url}/pulls/{pr_number}/reviews",
+            )
+            resp.raise_for_status()
+            all_reviews = resp.json()
+            self.logger.info(f"PR #{pr_number}: Found {len(all_reviews)} total reviews")
+
+            _BRAD_PREFIXES = ('Brad reaction: ', 'Brad checking')
+            _BOT_SUFFIXES = ('[bot]',)
+
+            needs_response = []
+
+            # Fetch issue comments ONCE for all reviews
+            all_issue_comments = self.fetch_issue_comments(pr_number)
+
+            for review in all_reviews:
+                review_id = review.get('id')
+                reviewer = review.get('user', {}).get('login', 'unknown')
+                review_body = review.get('body', '').strip()
+
+                # Skip if no body content
+                if not review_body:
+                    self.logger.debug(f"Review {review_id} has no body - skipping")
+                    continue
+
+                # Skip bot reviews (windsurf-bot[bot], github-actions[bot], etc.)
+                if any(reviewer.endswith(s) for s in _BOT_SUFFIXES):
+                    self.logger.debug(f"Review {review_id} by bot '{reviewer}' - skipping")
+                    continue
+
+                # Skip if review itself is from Brad
+                if any(review_body.startswith(p) for p in _BRAD_PREFIXES):
+                    self.logger.debug(f"Review {review_id} is Brad's own review - skipping")
+                    continue
+
+                # Check if there's a Brad response after this review in issue comments
+                review_time = review.get('submitted_at', '')
+
+                brad_responded = False
+                for comment in all_issue_comments:
+                    comment_time = comment.get('created_at', '')
+                    comment_body = comment.get('body', '')
+                    if comment_time > review_time and any(comment_body.startswith(p) for p in _BRAD_PREFIXES):
+                        brad_responded = True
+                        break
+
+                if not brad_responded:
+                    self.logger.info(f"Review {review_id} by {reviewer} NEEDS response: {review_body[:100]}...")
+                    needs_response.append({
+                        'id': review_id,
+                        'user': {'login': reviewer},
+                        'body': review_body,
+                        'created_at': review_time,
+                        'path': 'N/A',
+                        'line': 'N/A',
+                        'diff_hunk': '',
+                        '_is_review_level': True,
+                    })
+                else:
+                    self.logger.debug(f"Review {review_id} already has Brad response - skipping")
+
+            self.logger.info(f"PR #{pr_number}: {len(needs_response)} review-level comments need response")
+            return needs_response
+        except Exception as e:
+            self.logger.error(f"Failed to get review-level comments: {e}")
             return []

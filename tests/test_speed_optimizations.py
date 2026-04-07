@@ -225,6 +225,8 @@ class TestFailFastMissingBranch:
             {"id": 1, "body": "fix", "path": "a.py", "user": {"login": "rev"}},
             {"id": 2, "body": "fix2", "path": "b.py", "user": {"login": "rev"}},
         ]
+        orch.code_repo.get_review_level_comments_needing_response.return_value = []
+        orch.code_repo.get_issue_comments_needing_response.return_value = []
 
         orch._process_review_comments()
 

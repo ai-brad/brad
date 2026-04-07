@@ -73,3 +73,23 @@ class CodeRepositoryAdapter(ABC):
     def get_pr_checks(self, pr_number: int) -> List[Dict]:
         """Get CI check runs for a PR's head commit."""
         ...
+
+    @abstractmethod
+    def fetch_issue_comments(self, pr_number: int) -> List[Dict]:
+        """Fetch all general issue comments on a PR (not review comments)."""
+        ...
+
+    @abstractmethod
+    def get_issue_comments_needing_response(self, pr_number: int) -> List[Dict]:
+        """Get issue comments that haven't been responded to by Brad."""
+        ...
+
+    @abstractmethod
+    def reply_to_issue_comment(self, pr_number: int, comment_id: int, body: str) -> Dict:
+        """Reply to a specific issue comment."""
+        ...
+
+    @abstractmethod
+    def get_review_level_comments_needing_response(self, pr_number: int) -> List[Dict]:
+        """Get general PR review comments (review body, not line-specific) that need response."""
+        ...
