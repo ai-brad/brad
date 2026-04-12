@@ -215,6 +215,15 @@ class RepoManager:
             result = self._run_git("rev-parse", f"origin/{base_branch}", check=False)
             base_sha = result.stdout.strip()
             
+            # Validate commit hashes before proceeding
+            if not current_sha or len(current_sha) < 7 or not all(c in '0123456789abcdef' for c in current_sha.lower()):
+                self.logger.error(f"Invalid current SHA: '{current_sha}'")
+                return {"rebased": False, "error": "Invalid current commit hash"}
+            
+            if not base_sha or len(base_sha) < 7 or not all(c in '0123456789abcdef' for c in base_sha.lower()):
+                self.logger.error(f"Invalid base SHA: '{base_sha}'")
+                return {"rebased": False, "error": "Invalid base commit hash"}
+            
             # Check if already up to date by seeing if base is an ancestor
             result = self._run_git("merge-base", "--is-ancestor", f"origin/{base_branch}", "HEAD", check=False)
             if result.returncode == 0:
@@ -231,7 +240,8 @@ class RepoManager:
                 push_result = self._run_git("push", "origin", branch_name, "--force-with-lease", check=False)
                 if push_result.returncode != 0:
                     self.logger.warning(f"Rebase succeeded but push failed: {push_result.stderr}")
-                return {"rebased": True}
+                    return {"rebased": True, "push_failed": True, "error": push_result.stderr.strip()}
+                return {"rebased": True, "push_failed": False}
             else:
                 # Check if it's a conflict
                 if "conflict" in result.stdout.lower() or "conflict" in result.stderr.lower():

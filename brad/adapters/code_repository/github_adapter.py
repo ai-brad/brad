@@ -68,7 +68,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.info(f"Successfully opened PR #{pr_data['number']}: {pr_data['html_url']}")
             return pr_data
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"Failed to open PR: {e}")
+            self.logger.exception("Failed to open PR")
             if hasattr(e.response, 'text'):
                 self.logger.error(f"Response: {e.response.text}")
             raise
@@ -111,7 +111,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"Failed to fetch PR #{pr_number}: {e}")
+            self.logger.exception(f"Failed to fetch PR #{pr_number}")
             raise
 
     def pr_exists_for_branch(self, branch: str) -> Optional[int]:
@@ -131,7 +131,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 return pr_number
             return None
         except Exception as e:
-            self.logger.error(f"Failed to check for existing PR: {e}")
+            self.logger.exception("Failed to check for existing PR")
             return None
 
     def get_brad_prs(self) -> List[Dict]:
@@ -149,7 +149,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.info(f"Found {len(brad_prs)} Brad PRs")
             return brad_prs
         except Exception as e:
-            self.logger.error(f"Failed to fetch Brad PRs: {e}")
+            self.logger.exception("Failed to fetch Brad PRs")
             return []
 
     def get_review_comments_needing_response(self, pr_number: int) -> List[Dict]:
@@ -265,7 +265,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.info(f"PR #{pr_number}: {len(needs_response)} comments need response")
             return needs_response
         except Exception as e:
-            self.logger.error(f"Failed to get review comments: {e}")
+            self.logger.exception(f"Failed to get review comments for PR #{pr_number}")
             return []
 
     def get_comment_replies(self, pr_number: int, comment_id: int) -> List[Dict]:
@@ -279,7 +279,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 if c.get('in_reply_to_id') == comment_id
             ]
         except Exception as e:
-            self.logger.error(f"Failed to get comment replies: {e}")
+            self.logger.exception("Failed to get comment replies")
             return []
 
     def reply_to_review_comment(self, pr_number: int, comment_id: int, body: str) -> Dict:
@@ -298,7 +298,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            self.logger.error(f"Failed to reply to comment: {e}")
+            self.logger.exception("Failed to reply to comment")
             raise
 
     def close_pr(self, pr_number: int, comment: Optional[str] = None) -> None:
@@ -319,7 +319,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             resp.raise_for_status()
             self.logger.info(f"Successfully closed PR #{pr_number}")
         except Exception as e:
-            self.logger.error(f"Failed to close PR #{pr_number}: {e}")
+            self.logger.exception(f"Failed to close PR #{pr_number}")
             raise
 
     def rebase_pr(self, pr_number: int) -> dict:
@@ -385,7 +385,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 resp.raise_for_status()
                 return {"rebased": False, "error": f"Unexpected status {resp.status_code}"}
         except Exception as e:
-            self.logger.error(f"Failed to rebase PR #{pr_number}: {e}")
+            self.logger.exception(f"Failed to rebase PR #{pr_number}")
             return {"rebased": False, "error": str(e)}
 
     def update_pr_body(self, pr_number: int, body: str) -> None:
@@ -399,7 +399,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             )
             resp.raise_for_status()
         except Exception as e:
-            self.logger.error(f"Failed to update PR #{pr_number} body: {e}")
+            self.logger.exception(f"Failed to update PR #{pr_number} body")
             raise
 
     def get_pr_details(self, pr_number: int) -> Dict:
@@ -444,7 +444,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 for r in raw
             ]
         except Exception as e:
-            self.logger.error(f"Failed to get reviews for PR #{pr_number}: {e}")
+            self.logger.exception(f"Failed to get reviews for PR #{pr_number}")
             return []
 
     def get_pr_checks(self, pr_number: int) -> List[Dict]:
@@ -472,7 +472,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 for r in runs
             ]
         except Exception as e:
-            self.logger.error(f"Failed to get checks for PR #{pr_number}: {e}")
+            self.logger.exception(f"Failed to get checks for PR #{pr_number}")
             return []
 
     def fetch_issue_comments(self, pr_number: int) -> List[Dict]:
@@ -480,7 +480,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
         try:
             return self._fetch_all_pages(f"{self.base_url}/issues/{pr_number}/comments")
         except Exception as e:
-            self.logger.error(f"Failed to fetch issue comments for PR #{pr_number}: {e}")
+            self.logger.exception(f"Failed to fetch issue comments for PR #{pr_number}")
             return []
 
     def get_issue_comments_needing_response(self, pr_number: int) -> List[Dict]:
@@ -538,7 +538,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.info(f"PR #{pr_number}: {len(needs_response)} issue comments need response")
             return needs_response
         except Exception as e:
-            self.logger.error(f"Failed to get issue comments needing response: {e}")
+            self.logger.exception("Failed to get issue comments needing response")
             return []
 
     def delete_issue_comment(self, comment_id: int) -> bool:
@@ -551,7 +551,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             )
             return resp.status_code == 204
         except Exception as e:
-            self.logger.error(f"Failed to delete comment {comment_id}: {e}")
+            self.logger.exception(f"Failed to delete comment {comment_id}")
             return False
 
     def reply_to_issue_comment(self, pr_number: int, comment_id: int, body: str) -> Dict:
@@ -567,7 +567,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            self.logger.error(f"Failed to reply to issue comment: {e}")
+            self.logger.exception("Failed to reply to issue comment")
             raise
 
     def get_review_level_comments_needing_response(self, pr_number: int) -> List[Dict]:
@@ -643,5 +643,5 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.info(f"PR #{pr_number}: {len(needs_response)} review-level comments need response")
             return needs_response
         except Exception as e:
-            self.logger.error(f"Failed to get review-level comments: {e}")
+            self.logger.exception("Failed to get review-level comments")
             return []

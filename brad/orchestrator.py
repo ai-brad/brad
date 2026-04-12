@@ -256,8 +256,7 @@ class BradOrchestrator:
                 pr = self.code_repo.get_pr(pr_number)
                 branch_name = pr.get('head', {}).get('ref', '')
                 if not branch_name:
-                    self.logger.warning(f"PR #{pr_number} ({issue_key}) has no branch name")
-                    continue
+                    raise ValueError(f"PR #{pr_number} ({issue_key}) has no branch name")
                     
                 result = self.repo.rebase_branch(branch_name, base_branch="main")
                 if result.get("rebased"):
@@ -402,7 +401,8 @@ class BradOrchestrator:
         overall_code_changed = any(cr.get('action') == 'code_changed' for cr in comment_results)
 
         if overall_code_changed:
-            has_actual = self._has_uncommitted_or_new_commits(branch_name)
+            comment_ids = [c.get('id') for c in comments if c.get('id')]
+            has_actual = self._has_uncommitted_or_new_commits(branch_name, comment_ids)
             if not has_actual and attempt < MAX_ATTEMPTS:
                 self.logger.warning(
                     f"PR #{pr_number}: Agent claimed CODE_CHANGED on attempt {attempt} but no changes found. "
@@ -418,11 +418,16 @@ class BradOrchestrator:
                 return self._invoke_and_verify_batch(pr_number, branch_name, comments, attempt + 1)
             elif not has_actual:
                 self.logger.error(f"PR #{pr_number}: Agent claimed CODE_CHANGED after {attempt} attempts but still no changes!")
+                # Fallback: force all CODE_CHANGED results to 'replied' to prevent misleading responses
+                for cr in comment_results:
+                    if cr.get('action') == 'code_changed':
+                        cr['action'] = 'replied'
+                        self.logger.warning(f"Forced comment result to 'replied' due to no actual code changes")
                 overall_code_changed = False
 
         return comment_results, overall_code_changed
 
-    def _has_uncommitted_or_new_commits(self, branch_name: str) -> bool:
+    def _has_uncommitted_or_new_commits(self, branch_name: str, comment_ids: List[int] = None) -> bool:
         """Check if there are uncommitted changes or new commits not yet pushed.
         If uncommitted changes exist, auto-commit them (agent may have forgotten)."""
         try:
@@ -431,7 +436,15 @@ class BradOrchestrator:
             if result.stdout.strip():
                 self.logger.info(f"Found uncommitted changes on {branch_name}, auto-committing...")
                 self.repo._run_git("add", "-A")
-                self.repo._run_git("commit", "-m", f"Brad: address review comments on {branch_name}")
+                # Include comment IDs in commit message for traceability
+                if comment_ids:
+                    comment_ids_str = ", ".join(f"#{cid}" for cid in comment_ids[:5])  # Limit to first 5
+                    if len(comment_ids) > 5:
+                        comment_ids_str += f" (+{len(comment_ids) - 5} more)"
+                    commit_msg = f"Brad: address review comments {comment_ids_str} on {branch_name}"
+                else:
+                    commit_msg = f"Brad: address review comments on {branch_name}"
+                self.repo._run_git("commit", "-m", commit_msg)
                 return True
             # Check for unpushed commits
             result = self.repo._run_git("log", f"origin/{branch_name}..HEAD", "--oneline", check=False)

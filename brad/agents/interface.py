@@ -22,6 +22,7 @@ class AIAgentInterface:
     """
 
     _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
+    MAX_PR_DIFF_LENGTH = 8000  # Characters - truncate to avoid exceeding context limits
 
     def __init__(self, llm: LLMAdapter, cfg):
         self.logger = get_logger(__name__)
@@ -402,7 +403,7 @@ class AIAgentInterface:
         pr_diff_section = ""
         if pr_diff:
             # Truncate diff to avoid exceeding context limits
-            truncated = pr_diff[:8000] + "\n... (truncated)" if len(pr_diff) > 8000 else pr_diff
+            truncated = pr_diff[:self.MAX_PR_DIFF_LENGTH] + "\n... (truncated)" if len(pr_diff) > self.MAX_PR_DIFF_LENGTH else pr_diff
             pr_diff_section = f"\nPR DIFF (changes in this PR vs main — use this to understand what was changed):\n```\n{truncated}\n```\n"
 
         template = self._load_prompt("code_review_reader_batch.txt")
@@ -460,6 +461,11 @@ class AIAgentInterface:
         output_lower = output.lower()
         if output.startswith("ERROR:"):
             return {"action": "error", "message": output, "pr_number": None, "pr_url": None}
+
+        # Check for CODE_CHANGED: format (used in review fix responses for consistency)
+        if output.startswith("CODE_CHANGED:"):
+            self.logger.info("Detected: CODE_CHANGED format (in progress)")
+            return {"action": "in_progress", "message": output, "pr_number": None, "pr_url": None}
 
         # Check for PR creation FIRST — this takes priority over everything else
         # CRITICAL: Only return success if we have an ACTUAL PR number or URL, not just the words "pull request"
