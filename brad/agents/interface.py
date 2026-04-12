@@ -21,10 +21,26 @@ class AIAgentInterface:
     Supports warm-start: pass previous_response_id to continue conversation context.
     """
 
+    _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
+    MAX_PR_DIFF_LENGTH = 8000  # Characters - truncate to avoid exceeding context limits
+
     def __init__(self, llm: LLMAdapter, cfg):
         self.logger = get_logger(__name__)
         self.cfg = cfg
         self.llm = llm
+        self._prompt_cache: Dict[str, str] = {}
+
+    def _load_prompt(self, name: str) -> str:
+        """Load a prompt template from the prompts/ directory, with caching."""
+        if name in self._prompt_cache:
+            return self._prompt_cache[name]
+        prompt_path = self._PROMPTS_DIR / name
+        if not prompt_path.exists():
+            raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+        content = prompt_path.read_text(encoding="utf-8")
+        self._prompt_cache[name] = content
+        self.logger.debug(f"Loaded prompt template: {name} ({len(content)} chars)")
+        return content
 
     # ------------------------------------------------------------------
     # Public methods called by Orchestrator
@@ -176,10 +192,11 @@ class AIAgentInterface:
         repo_path: str,
         previous_response_id: Optional[str] = None,
         dev_instructions: str = "",
+        pr_diff: str = "",
     ) -> Dict:
         """Analyze ALL review comments for a PR in a single LLM call."""
         self.logger.info(f"Code review reader (batch): PR #{pr_number}, {len(comments)} comments")
-        prompt = self._build_code_review_reader_batch_prompt(pr_number, branch_name, comments, dev_instructions)
+        prompt = self._build_code_review_reader_batch_prompt(pr_number, branch_name, comments, dev_instructions, pr_diff=pr_diff)
         codebase_map = get_codebase_map(repo_path)
         result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_code_review_reader_batch_response(result.text, comments)
@@ -252,25 +269,12 @@ class AIAgentInterface:
                 f"- {Path(p).name}: {p}" for p in attachment_paths
             )
 
-        return f"""You are Brad, an autonomous senior software engineer analyzing issue {issue_key}.
-
-Issue Description:
-{description}
-{attachments_text}
-
-CRITICAL INSTRUCTIONS:
-1. Search and analyze the codebase thoroughly to understand current behavior
-2. Translate findings into BUSINESS/FUNCTIONAL language for the PM
-3. RESPOND with ONE of these formats:
-   - "CLARIFYING QUESTIONS:" followed by questions
-   - "ACCEPTANCE CRITERIA:" followed by scenarios
-   - "READY TO IMPLEMENT" followed by summary
-
-Use plain text formatting. Keep output PM-friendly and business-focused.
-No code references, file names, or technical jargon.
-
-If requirements are clear and acceptance criteria already exist: respond with "READY TO IMPLEMENT".
-"""
+        template = self._load_prompt("requirements.txt")
+        return template.format(
+            issue_key=issue_key,
+            description=description,
+            attachments_text=attachments_text,
+        )
 
     def _build_implementation_prompt(self, issue_key, description, attachment_paths, branch_name, iteration, pre_search="", dev_instructions=""):
         attachments_text = ""
@@ -283,45 +287,18 @@ If requirements are clear and acceptance criteria already exist: respond with "R
         if pre_search:
             pre_search_text = f"\n\nPRE-SEARCH RESULTS (relevant files found by searching the codebase for key terms from the requirements — use these to skip exploration and start implementing faster):\n{pre_search}\n"
 
-        return f"""You are Brad, an autonomous software engineer implementing issue {issue_key}.
+        dev_instructions_section = f"\nREPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):\n{dev_instructions}\n" if dev_instructions else ""
 
-Branch: {branch_name}
-Iteration: {iteration}
-
-Requirements:
-{description}
-{attachments_text}
-{pre_search_text}
-MANDATORY IMPLEMENTATION STEPS (in order):
-1. Implement the feature according to requirements
-2. Write tests appropriate for the change type:
-   - **Backend logic**: unit tests in tests/unit/ (mandatory)
-   - **API endpoints**: integration tests exercising the endpoint
-   - **UI/frontend templates**: template rendering tests (verify HTML output contains expected elements)
-   - **Database changes**: migration tests and data integrity tests
-   - **Configuration**: config validation tests
-3. Run ONLY the relevant tests locally to verify — try to fix failures but do NOT get stuck on environment issues
-4. Commit ALL changes with message: "{issue_key}: <concise description>"
-5. Push the branch to origin: `git push origin {branch_name}`
-6. Create a pull request against main using: `gh pr create --base main --head {branch_name} --title "Brad: {issue_key}: <summary>" --body "<description>"`
-
-CRITICAL EFFICIENCY RULES (cost budget is limited):
-- Use the pre-search results above to go directly to the relevant files — do NOT do broad exploratory searches
-- Use `multi_edit_file` to batch ALL edits to multiple files in a single call instead of editing files one by one
-- Follow existing code style exactly
-- DO NOT create utility files like *_ACCEPTANCE_CRITERIA.md, *_PROGRESS.md, etc.
-- On Windows, set environment variables with `set VAR=value && command` (not Unix VAR=value syntax)
-- ALWAYS commit, push, and create PR even if local tests have minor issues — the CI pipeline is the real test authority
-- MINIMIZE iterations: read files in batches, edit files in batches, think before acting
-- DO NOT re-read files you have already read unless they changed
-{f"""
-REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
-{dev_instructions}
-""" if dev_instructions else ""}
-After completing the work, respond with a status update that MUST include the PR URL:
-- If PR CREATED: include the PR number and URL, e.g. "Created PR #123: https://github.com/.../pull/123"
-- If STUCK and unable to create PR: clearly state what blocked you
-"""
+        template = self._load_prompt("implementation.txt")
+        return template.format(
+            issue_key=issue_key,
+            branch_name=branch_name,
+            iteration=iteration,
+            description=description,
+            attachments_text=attachments_text,
+            pre_search_text=pre_search_text,
+            dev_instructions_section=dev_instructions_section,
+        )
 
     def _build_ci_fix_prompt(self, issue_key, description, ci_logs, failed_jobs, pr_number, iteration, failed_test_target=None, dev_instructions=""):
         if failed_test_target:
@@ -332,34 +309,25 @@ After completing the work, respond with a status update that MUST include the PR
             )
         else:
             test_instruction = (
-                "3. Re-run relevant tests to verify your fix\n"
+                "3. Re-run relevant tests to verify your fix (consult dev instructions for commands):\n"
+                "   - If CI failed on backend/Python tests → run backend unit tests (e.g., pytest)\n"
+                "   - If CI failed on frontend/lint/UI tests → run frontend lint + tests (e.g., npm run prepare-commit)\n"
                 "   Do NOT run the full test suite — CI will handle that"
             )
-        return f"""You are Brad, fixing CI failures for issue {issue_key} (PR #{pr_number}).
 
-Iteration: {iteration}
+        dev_instructions_section = f"\nREPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):\n{dev_instructions}\n" if dev_instructions else ""
 
-Original Requirements:
-{description}
-
-Failed CI Jobs:
-{', '.join(failed_jobs)}
-
-CI Logs:
-{ci_logs}
-
-MANDATORY STEPS:
-1. Analyze the CI failure logs to understand what's failing
-2. Identify and fix the root cause
-{test_instruction}
-4. Only after tests pass locally: Commit with message "{issue_key}: Fix CI - <what was fixed>"
-5. Push changes: `git push origin {issue_key}`
-
-After fixing, respond with status. If FIXED: state what was wrong and changed. If STUCK: explain why.
-{f"""
-REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
-{dev_instructions}
-""" if dev_instructions else ""}"""
+        template = self._load_prompt("ci_fix.txt")
+        return template.format(
+            issue_key=issue_key,
+            pr_number=pr_number,
+            iteration=iteration,
+            description=description,
+            failed_jobs=', '.join(failed_jobs),
+            ci_logs=ci_logs,
+            test_instruction=test_instruction,
+            dev_instructions_section=dev_instructions_section,
+        )
 
     def _build_review_fix_prompt(self, issue_key, description, review_comments, pr_number, iteration, dev_instructions=""):
         comments_text = ""
@@ -370,28 +338,17 @@ REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
             user = comment.get('user', {}).get('login', 'Unknown')
             comments_text += f"\n{i}. File: {path}:{line}\n   Reviewer ({user}): {body}\n"
 
-        return f"""You are Brad, addressing code review comments for issue {issue_key} (PR #{pr_number}).
+        dev_instructions_section = f"\nREPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):\n{dev_instructions}\n" if dev_instructions else ""
 
-Iteration: {iteration}
-
-Original Requirements:
-{description}
-
-Code Review Comments:
-{comments_text}
-
-MANDATORY STEPS:
-1. Read and understand each review comment carefully
-2. Address each comment by making the requested changes
-3. Run relevant tests to ensure nothing is broken
-4. Only after tests pass: Commit with message "{issue_key}: Address review comments - <summary>"
-5. Push changes: `git push origin {issue_key}`
-
-After addressing comments, respond with status. Address ALL review comments, not just some.
-{f"""
-REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
-{dev_instructions}
-""" if dev_instructions else ""}"""
+        template = self._load_prompt("review_fix.txt")
+        return template.format(
+            issue_key=issue_key,
+            pr_number=pr_number,
+            iteration=iteration,
+            description=description,
+            comments_text=comments_text,
+            dev_instructions_section=dev_instructions_section,
+        )
 
     def _build_code_review_reader_prompt(self, pr_number, branch_name, comment):
         file_path = comment.get('path', 'N/A')
@@ -400,41 +357,18 @@ REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
         reviewer = comment.get('user', {}).get('login', 'unknown')
         diff_hunk = comment.get('diff_hunk', '')
 
-        return f"""You are Brad, an autonomous software engineer analyzing a code review comment on PR #{pr_number}.
+        template = self._load_prompt("code_review_reader.txt")
+        return template.format(
+            pr_number=pr_number,
+            branch_name=branch_name,
+            file_path=file_path,
+            line=line,
+            body=body,
+            reviewer=reviewer,
+            diff_hunk=diff_hunk,
+        )
 
-Branch: {branch_name}
-
-Review Comment:
-- Reviewer: {reviewer}
-- File: {file_path}:{line}
-- Comment: {body}
-
-Diff context:
-{diff_hunk}
-
-ANALYSIS INSTRUCTIONS:
-1. Read the comment carefully and understand what the reviewer is asking
-2. Examine the file and surrounding code to understand the full context
-3. Determine the comment's category:
-   a) LEGITIMATE BUG/ISSUE - the reviewer found a real problem that needs a code fix
-   b) VALID SUGGESTION - the reviewer suggests an improvement worth making
-   c) STYLE/NITPICK - low-value formatting or naming preference; can be acknowledged but not necessarily changed
-   d) QUESTION - the reviewer is asking for clarification, not requesting a change
-   e) INCORRECT/INVALID - the reviewer misunderstood the code; no change needed
-
-ACTION RULES:
-- For (a) and (b): Fix the code, run relevant tests, commit and push. Then reply explaining what you changed.
-- For (c): If trivial, make the change. If opinionated, reply politely explaining your reasoning and resolve.
-- For (d): Reply with a clear explanation.
-- For (e): Reply politely explaining why the current code is correct.
-
-After completing your action, respond with ONE of these:
-- "CODE_CHANGED: <summary of what was changed>" — if you modified code
-- "REPLIED: <your reply text>" — if you only replied without code changes
-- "STUCK: <reason>" — if you cannot resolve this
-"""
-
-    def _build_code_review_reader_batch_prompt(self, pr_number, branch_name, comments, dev_instructions=""):
+    def _build_code_review_reader_batch_prompt(self, pr_number, branch_name, comments, dev_instructions="", pr_diff=""):
         comments_section = ""
         for i, comment in enumerate(comments, 1):
             file_path = comment.get('path', 'N/A')
@@ -447,97 +381,62 @@ After completing your action, respond with ONE of these:
             comments_section += f"Reviewer: {reviewer}\n"
             comments_section += f"File: {file_path}:{line}\n"
             comments_section += f"Comment: {body}\n"
+            
+            # Include thread replies for full conversation context
+            thread_replies = comment.get('_thread_replies', [])
+            if thread_replies:
+                comments_section += f"\nThread conversation:\n"
+                for reply in thread_replies:
+                    reply_author = reply.get('user', {}).get('login', 'unknown')
+                    reply_body = reply.get('body', '')
+                    comments_section += f"  {reply_author}: {reply_body}\n"
+            
+            # Include retry hint if this is a retry attempt
+            retry_hint = comment.get('_retry_hint', '')
+            if retry_hint:
+                comments_section += f"\n⚠️ {retry_hint}\n"
+
             comments_section += f"Diff context:\n{diff_hunk}\n"
 
-        return f"""You are Brad, an autonomous software engineer analyzing {len(comments)} code review comments on PR #{pr_number}.
+        dev_instructions_section = f"\nREPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):\n{dev_instructions}\n" if dev_instructions else ""
 
-Branch: {branch_name}
+        pr_diff_section = ""
+        if pr_diff:
+            # Truncate diff to avoid exceeding context limits
+            truncated = pr_diff[:self.MAX_PR_DIFF_LENGTH] + "\n... (truncated)" if len(pr_diff) > self.MAX_PR_DIFF_LENGTH else pr_diff
+            pr_diff_section = f"\nPR DIFF (changes in this PR vs main — use this to understand what was changed):\n```\n{truncated}\n```\n"
 
-Review Comments:
-{comments_section}
-
-ANALYSIS INSTRUCTIONS:
-1. Read ALL comments carefully
-2. Examine each referenced file to understand the full context
-3. For each comment, determine its category:
-   a) LEGITIMATE BUG/ISSUE - needs a code fix
-   b) VALID SUGGESTION - worth making
-   c) STYLE/NITPICK - acknowledge but not necessarily change
-   d) QUESTION - reply with explanation
-   e) INCORRECT/INVALID - explain why current code is correct
-   f) TEST/VERIFICATION REQUEST - reviewer asks to run tests or provide evidence
-
-ACTION RULES:
-- For (a) and (b): Fix the code. Batch all fixes before running tests.
-- For (c): If trivial, make the change. If opinionated, just reply.
-- For (d) and (e): Reply only.
-- For (f): Actually RUN the requested tests/commands and paste the output as your reply. Do not just say you cannot — use the run_command tool.
-- Run tests ONCE after all code changes, not after each individual fix.
-- Commit all changes in a single commit.
-
-RESPONSE FORMAT — you MUST respond with a result for EACH comment using this exact format:
-
-COMMENT <id>: CODE_CHANGED: <summary>
-or
-COMMENT <id>: REPLIED: <reply text>
-or
-COMMENT <id>: STUCK: <reason>
-
-List ALL {len(comments)} comments in your response, one per line.
-{f"""
-REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
-{dev_instructions}
-""" if dev_instructions else ""}"""
+        template = self._load_prompt("code_review_reader_batch.txt")
+        return template.format(
+            num_comments=len(comments),
+            pr_number=pr_number,
+            branch_name=branch_name,
+            comments_section=comments_section,
+            dev_instructions_section=dev_instructions_section,
+            pr_diff_section=pr_diff_section,
+        )
 
     def _build_local_review_fix_prompt(self, issue_key, description, review_feedback, branch_name, iteration, dev_instructions=""):
-        return f"""You are Brad, addressing local code review feedback for issue {issue_key}.
+        dev_instructions_section = f"\nREPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):\n{dev_instructions}\n" if dev_instructions else ""
 
-Branch: {branch_name}
-Iteration: {iteration}
-
-Original Requirements:
-{description}
-
-Local Review Feedback:
-{review_feedback}
-
-MANDATORY STEPS:
-1. Read and understand the review feedback carefully
-2. Address the requested changes in code
-3. Run relevant tests to ensure nothing is broken
-4. Only after tests pass: Commit with message "{issue_key}: Address local review feedback - <summary>"
-5. Push changes: `git push origin {branch_name}`
-
-After addressing the feedback, respond with ONE of these:
-- "FIXED: <summary of what was changed>" — if you updated the code
-- "STUCK: <reason>" — if you cannot resolve the feedback
-{f"""
-REPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):
-{dev_instructions}
-""" if dev_instructions else ""}"""
+        template = self._load_prompt("local_review_fix.txt")
+        return template.format(
+            issue_key=issue_key,
+            branch_name=branch_name,
+            iteration=iteration,
+            description=description,
+            review_feedback=review_feedback,
+            dev_instructions_section=dev_instructions_section,
+        )
 
     def _build_local_review_prompt(self, issue_key, description, diff, branch_name):
-        return f"""You are a senior code reviewer. Review the following changes for issue {issue_key}.
-
-Branch: {branch_name}
-
-Requirements:
-{description}
-
-Git diff of all changes:
-{diff}
-
-REVIEW INSTRUCTIONS:
-1. Use tools to explore context around the changes
-2. Check implementation matches requirements
-3. Look for bugs, edge cases, missing error handling
-4. Check code style consistency
-5. Verify test coverage
-
-RESPOND with ONE of:
-a) "APPROVED" - if the code is correct and ready to merge
-b) "CHANGES REQUESTED:" - if there are issues (list each with file path)
-"""
+        template = self._load_prompt("local_review.txt")
+        return template.format(
+            issue_key=issue_key,
+            branch_name=branch_name,
+            description=description,
+            diff=diff,
+        )
 
     # ------------------------------------------------------------------
     # Response parsers
@@ -563,22 +462,42 @@ b) "CHANGES REQUESTED:" - if there are issues (list each with file path)
         if output.startswith("ERROR:"):
             return {"action": "error", "message": output, "pr_number": None, "pr_url": None}
 
+        # Check for CODE_CHANGED: format (used in review fix responses for consistency)
+        if output.startswith("CODE_CHANGED:"):
+            self.logger.info("Detected: CODE_CHANGED format (in progress)")
+            return {"action": "in_progress", "message": output, "pr_number": None, "pr_url": None}
+
         # Check for PR creation FIRST — this takes priority over everything else
+        # CRITICAL: Only return success if we have an ACTUAL PR number or URL, not just the words "pull request"
         pr_match = re.search(r'pr\s*#?(\d+)', output_lower)
         pr_url_match = re.search(r'(https://github\.com/[^\s]+/pull/\d+)', output, re.IGNORECASE)
-        if pr_match or pr_url_match or 'created pr' in output_lower or 'pull request' in output_lower:
+        
+        # Only return success if we have CONCRETE evidence of a PR (number OR URL)
+        if pr_match or pr_url_match:
             pr_number = int(pr_match.group(1)) if pr_match else None
             pr_url = pr_url_match.group(1) if pr_url_match else None
             self.logger.info(f"Detected: PR #{pr_number} at {pr_url}")
             return {"action": "success", "pr_number": pr_number, "pr_url": pr_url, "message": output}
 
-        # Only if no PR was detected, check for failure/stuck keywords
+        # Check for explicit DONE statement with PR
+        if output.startswith("DONE:") and ('pr #' in output_lower or 'github.com' in output_lower):
+            self.logger.info("Detected: DONE with PR reference")
+            return {"action": "success", "pr_number": None, "pr_url": None, "message": output}
+
+        # Check for explicit STUCK statement
+        if output.startswith("STUCK:"):
+            self.logger.info("Detected: explicit STUCK statement")
+            return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
+
+        # Check for failure/stuck keywords
         if any(kw in output_lower for kw in ['tests failed', 'test failed', 'implementation incomplete']):
             self.logger.info("Detected: tests failed (no PR created)")
             return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
         if any(kw in output_lower for kw in ['stuck', 'cannot', 'unable to', 'blocked']):
             self.logger.info("Detected: stuck/blocked")
             return {"action": "stuck", "message": output, "pr_number": None, "pr_url": None}
+        
+        # Default: still in progress (agent needs to continue working)
         self.logger.info("Detected: in progress (no PR yet)")
         return {"action": "in_progress", "message": output, "pr_number": None, "pr_url": None}
 
