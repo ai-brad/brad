@@ -48,7 +48,13 @@ EFFICIENCY RULES (cost budget is limited):
 RESPONSE FORMAT — After completing ALL mandatory steps above, respond with:
 "DONE: Created PR #<number>: <url>"
 
-If you get stuck and cannot complete the implementation, respond with:
-"STUCK: <specific reason why you cannot proceed>"
+If you genuinely cannot complete the implementation due to MISSING INFORMATION from the requirements (e.g., unclear specifications, ambiguous business logic, missing context), respond with:
+"STUCK: <specific question or clarification needed>"
+ 
+Valid reasons for STUCK:
+✓ Requirements are unclear or contradictory
+✓ Critical business logic is not specified
+✓ Need clarification on expected behavior
+✗ DO NOT use STUCK for: network access, git credentials, or tool availability — you HAVE these
 
 NEVER respond with "DONE" if you haven't actually modified source files and created a PR!
