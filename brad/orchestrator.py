@@ -18,6 +18,7 @@ from brad.adapters.observability.azure_adapter import AzureObservabilityAdapter
 from brad.adapters.llm.azure_openai_adapter import AzureOpenAIAdapter
 from brad.agents.interface import AIAgentInterface
 from brad.repo_manager import RepoManager
+from brad.commit_sanitizer import CommitSanitizer
 from brad.adf_parser import adf_to_text
 from brad.phase_cache import get_cached_phase, set_cached_phase
 from brad.test_selector import extract_failed_tests_from_ci_logs
@@ -61,6 +62,7 @@ class BradOrchestrator:
         llm = AzureOpenAIAdapter(cfg)
         self.agent = AIAgentInterface(llm, cfg)
         self.repo = RepoManager(cfg)
+        self.sanitizer = CommitSanitizer(self.repo, llm)
 
         # Model identity for cache keys
         self._model_identity = f"{cfg.azure_openai_endpoint}|{cfg.azure_openai_model}"
@@ -139,6 +141,42 @@ class BradOrchestrator:
         db.set_repo_metadata(repo_path, "dev_instructions_commit", current_commit)
         self.logger.info(f"Cached repo dev instructions ({len(combined)} chars from {source_files})")
         return combined
+
+    def _sanitize_before_push(
+        self,
+        branch_name: str,
+        issue_key: Optional[str] = None,
+        issue_description: str = "",
+        force_push_if_changed: bool = False,
+    ) -> dict:
+        """Run the AI-driven commit sanitizer to strip throwaway artifacts before push.
+
+        If ``force_push_if_changed`` is True and the sanitizer removed files while
+        the branch already exists on the remote, force-push the rewritten branch.
+        Returns the sanitizer summary dict.
+        """
+        key = issue_key or branch_name
+        summary = {"removed": [], "kept": [], "candidates": 0, "error": None}
+        try:
+            summary = self.sanitizer.run(
+                issue_key=key,
+                issue_description=issue_description or "",
+                branch_name=branch_name,
+            )
+        except Exception as e:
+            self.logger.warning(f"{key}: sanitizer error (continuing): {e}")
+            return summary
+
+        if force_push_if_changed and summary.get("removed"):
+            try:
+                if self.repo.branch_exists_remote(branch_name):
+                    self.logger.info(
+                        f"{key}: sanitizer removed {len(summary['removed'])} file(s); force-pushing"
+                    )
+                    self.repo.push(branch_name, force=True)
+            except Exception as e:
+                self.logger.warning(f"{key}: sanitizer force-push failed: {e}")
+        return summary
 
     def _set_phase(self, state: IssueState, phase: str, detail: str = "") -> None:
         """Update execution's current phase for live GUI display."""
@@ -364,6 +402,7 @@ class BradOrchestrator:
 
         # Push once if verified changes exist
         if overall_code_changed:
+            self._sanitize_before_push(branch_name)
             try:
                 self.repo.push(branch_name, force=False)
             except Exception:
@@ -502,6 +541,7 @@ class BradOrchestrator:
 
         # Push once if verified changes exist
         if overall_code_changed:
+            self._sanitize_before_push(branch_name)
             try:
                 self.repo.push(branch_name, force=False)
             except Exception:
@@ -699,6 +739,17 @@ class BradOrchestrator:
         if self._check_cost_budget(state):
             return
 
+        # Sanitize branch: the agent may have committed+pushed throwaway artifacts
+        # (plans, summaries, debug scripts, playwright logs, etc.). Strip them now
+        # and force-push if needed, before local review / PR creation.
+        self._set_phase(state, "sanitizing", "Removing throwaway artifacts before PR")
+        self._sanitize_before_push(
+            state.branch_name,
+            issue_key=state.issue_key,
+            issue_description=state.description,
+            force_push_if_changed=True,
+        )
+
         # Implementation succeeded — run local review BEFORE creating PR
         self._set_phase(state, "local_review", "Reviewing code locally before creating PR")
         self.ticketing.comment(state.issue_key, "Implementation complete. Running local code review before creating PR...")
@@ -778,6 +829,11 @@ class BradOrchestrator:
             return (existing_pr, pr_url)
 
         if not self.repo.branch_exists_remote(branch_name):
+            self._sanitize_before_push(
+                branch_name,
+                issue_key=state.issue_key,
+                issue_description=state.description,
+            )
             try:
                 self.repo.push(branch_name)
             except Exception as e:

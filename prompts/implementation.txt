@@ -39,7 +39,7 @@ EFFICIENCY RULES (cost budget is limited):
 - Use the pre-search results above to go directly to the relevant files — do NOT do broad exploratory searches
 - Use `multi_edit_file` to batch ALL edits to multiple files in a single call instead of editing files one by one
 - Follow existing code style exactly
-- DO NOT create utility files like *_ACCEPTANCE_CRITERIA.md, *_PROGRESS.md, etc.
+- DO NOT commit throwaway artifacts. Never commit files that exist only to help you think or track progress: PRDs, plans, summaries, progress notes, scratch/debug/repro scripts, playwright reports (playwright-report/, test-results/, log.html, trace.zip), build/test output, *.log, or new *.md files that merely describe what you just did. Only commit source code, tests, and docs changes REQUIRED by the issue. When in doubt, don't create the file — use your scratchpad reasoning, not the repo.
 - On Windows, set environment variables with `set VAR=value && command` (not Unix VAR=value syntax)
 - ALWAYS commit, push, and create PR even if local tests have minor issues — the CI pipeline is the real test authority
 - MINIMIZE iterations: read files in batches, edit files in batches, think before acting

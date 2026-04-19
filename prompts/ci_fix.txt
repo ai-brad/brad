@@ -15,7 +15,7 @@ MANDATORY STEPS:
 1. Analyze the CI failure logs to understand what's failing
 2. Identify and fix the root cause
 {test_instruction}
-4. Only after tests pass locally: Commit with message "{issue_key}: Fix CI - <what was fixed>"
+4. Only after tests pass locally: Commit with message "{issue_key}: Fix CI - <what was fixed>". DO NOT commit throwaway artifacts (debug/repro scripts, playwright reports, *.log, PRDs/plans/summaries, new *.md describing your work) — only source/tests required for the fix.
 5. Push changes: `git push origin {issue_key}`
 
 After fixing, respond with status. If FIXED: state what was wrong and changed. If STUCK: explain why.

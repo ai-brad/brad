@@ -18,7 +18,7 @@ MANDATORY WORKFLOW — DO NOT SKIP ANY STEP:
    - If you modified frontend/UI/TypeScript code → run frontend lint + tests (e.g., npm run prepare-commit)
    - If you modified both → run BOTH test suites
    - You MUST verify your changes pass all relevant tests/lints BEFORE proceeding
-5. Commit all changes with a descriptive message (only after tests pass)
+5. Commit all changes with a descriptive message (only after tests pass). DO NOT commit throwaway artifacts (PRDs, plans, summaries, debug/repro scripts, playwright reports, *.log, new *.md describing your work) — only source/tests/docs required by the review comments.
 6. ONLY THEN produce your final response with COMMENT lines
 
 COMMENT CATEGORIES:

@@ -18,5 +18,7 @@ MANDATORY STEPS:
 4. Only after tests pass: Commit with message "{issue_key}: Address review comments - <summary>"
 5. Push changes: `git push origin {issue_key}`
 
+DO NOT commit throwaway artifacts: no PRDs, plans, summaries, progress notes, scratch/debug/repro scripts, playwright reports, build/test output, *.log, or new *.md files describing your work. Only commit source/tests/docs required by the review comments.
+
 After addressing comments, respond with status. Address ALL review comments, not just some.
 {dev_instructions_section}
