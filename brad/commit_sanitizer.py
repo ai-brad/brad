@@ -89,6 +89,8 @@ class CommitSanitizer:
     TAIL_LINES = 20
     # Cap number of candidates fed to the LLM in one call
     MAX_CANDIDATES = 20
+    # Cap number of filenames fed to the first-pass triage LLM call
+    MAX_FILENAMES_TRIAGE = 400
 
     def __init__(self, repo_manager, llm_adapter, base_branch: str = "main"):
         self.logger = get_logger(__name__)
@@ -96,6 +98,7 @@ class CommitSanitizer:
         self.llm = llm_adapter
         self.base_branch = base_branch
         self._prompt_template: Optional[str] = None
+        self._triage_prompt_template: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -109,16 +112,37 @@ class CommitSanitizer:
                 self.logger.info(f"[sanitizer] {issue_key}: no added files on {branch_name}, skipping")
                 return summary
 
-            candidates = self._pick_candidates(added)
+            # Union of (1) cheap heuristic and (2) LLM filename-triage pass.
+            # The deterministic filter catches obvious junk without an LLM call;
+            # the LLM triage catches fishy-looking names the heuristic misses.
+            heuristic_set = {p for p in added if self._is_suspicious(p)}
+            llm_flagged = self._triage_by_names(issue_key, issue_description, branch_name, added)
+            if llm_flagged is None:
+                self.logger.info(
+                    f"[sanitizer] {issue_key}: filename triage failed, falling back to heuristic only"
+                )
+                flagged_paths = heuristic_set
+            else:
+                flagged_paths = heuristic_set | set(llm_flagged)
+
+            if not flagged_paths:
+                self.logger.info(
+                    f"[sanitizer] {issue_key}: {len(added)} added files, all look clean"
+                )
+                return summary
+
+            candidates = self._pick_candidates([p for p in added if p in flagged_paths])
             summary["candidates"] = len(candidates)
             if not candidates:
                 self.logger.info(
-                    f"[sanitizer] {issue_key}: {len(added)} added files, none suspicious"
+                    f"[sanitizer] {issue_key}: {len(added)} added files, "
+                    f"{len(flagged_paths)} flagged but none readable"
                 )
                 return summary
 
             self.logger.info(
-                f"[sanitizer] {issue_key}: {len(candidates)} suspicious candidates "
+                f"[sanitizer] {issue_key}: {len(candidates)} flagged candidates "
+                f"(heuristic={len(heuristic_set)}, llm={len(llm_flagged or [])}) "
                 f"out of {len(added)} added files"
             )
 
@@ -176,17 +200,70 @@ class CommitSanitizer:
     # ------------------------------------------------------------------
     # Step 2: narrow to "suspicious" candidates
     # ------------------------------------------------------------------
-    def _pick_candidates(self, added_paths: List[str]) -> List[_Candidate]:
+    def _pick_candidates(self, flagged_paths: List[str]) -> List[_Candidate]:
         candidates: List[_Candidate] = []
-        for path in added_paths:
-            if not self._is_suspicious(path):
-                continue
+        for path in flagged_paths:
             c = self._build_candidate(path)
             if c is not None:
                 candidates.append(c)
             if len(candidates) >= self.MAX_CANDIDATES:
                 break
         return candidates
+
+    # ------------------------------------------------------------------
+    # Stage A: LLM filename triage (names only)
+    # ------------------------------------------------------------------
+    def _load_triage_prompt(self) -> str:
+        if self._triage_prompt_template is None:
+            prompt_path = (
+                Path(__file__).resolve().parent.parent / "prompts" / "sanitize_filenames.txt"
+            )
+            self._triage_prompt_template = prompt_path.read_text(encoding="utf-8")
+        return self._triage_prompt_template
+
+    def _triage_by_names(
+        self,
+        issue_key: str,
+        issue_description: str,
+        branch_name: str,
+        added_paths: List[str],
+    ) -> Optional[List[str]]:
+        """Ask the LLM which added paths look fishy based on names only.
+
+        Returns a list of flagged paths, or None if the call/parse failed.
+        An empty list means the LLM looked and saw nothing suspicious.
+        """
+        paths = added_paths[: self.MAX_FILENAMES_TRIAGE]
+        description_excerpt = (issue_description or "").strip()
+        if len(description_excerpt) > 2000:
+            description_excerpt = description_excerpt[:2000] + "\n... [truncated]"
+        prompt = self._load_triage_prompt().format(
+            issue_key=issue_key,
+            branch_name=branch_name,
+            issue_description=description_excerpt or "(no description)",
+            file_list="\n".join(paths),
+        )
+        try:
+            result = self.llm.run(prompt, str(self.repo.repo_path), system_prompt="")
+        except Exception as e:
+            self.logger.warning(f"[sanitizer] filename triage LLM call failed: {e}")
+            return None
+
+        text = (result.text or "").strip()
+        if not text:
+            return None
+        parsed = self._parse_json_object(text)
+        if parsed is None:
+            self.logger.warning(
+                f"[sanitizer] could not parse filename-triage JSON; raw: {text[:300]}"
+            )
+            return None
+        fishy = parsed.get("fishy", [])
+        if not isinstance(fishy, list):
+            return None
+        # Only honor paths that actually exist in the added set
+        added_set = set(added_paths)
+        return [p for p in fishy if isinstance(p, str) and p in added_set]
 
     @staticmethod
     def _is_suspicious(path: str) -> bool:
@@ -288,6 +365,21 @@ class CommitSanitizer:
             if path in presented:
                 clean.append(d)
         return clean
+
+    @staticmethod
+    def _parse_json_object(text: str) -> Optional[dict]:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+            stripped = re.sub(r"\s*```\s*$", "", stripped)
+        match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
 
     @staticmethod
     def _parse_json_array(text: str) -> Optional[list]:

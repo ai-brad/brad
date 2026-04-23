@@ -117,11 +117,20 @@ def git_repo(tmp_path):
     return repo
 
 
-def _make_sanitizer(repo_path, llm_text):
+def _make_sanitizer(repo_path, llm_text, triage_text='{"fishy": []}'):
+    """Build a sanitizer with a mocked LLM.
+
+    First LLM call = filename triage (expects a JSON object), second = deep
+    classification (expects a JSON array). ``triage_text`` defaults to flagging
+    nothing, so the heuristic filter alone decides what reaches stage B.
+    """
     cfg = make_test_config(repo_path)
     rm = RepoManager(cfg)
     llm = MagicMock()
-    llm.run.return_value = LLMResult(text=llm_text, response_id=None, usage=LLMUsage())
+    llm.run.side_effect = [
+        LLMResult(text=triage_text, response_id=None, usage=LLMUsage()),
+        LLMResult(text=llm_text, response_id=None, usage=LLMUsage()),
+    ]
     return CommitSanitizer(rm, llm), rm, llm
 
 
@@ -185,6 +194,88 @@ def test_run_fails_open_on_invalid_llm_output(git_repo):
     assert summary["removed"] == []
     assert summary["error"] == "classification_failed"
     assert (git_repo / "FEATURE_PLAN.md").exists()
+
+
+def test_triage_catches_name_the_heuristic_misses(tmp_path):
+    """LLM triage flags a weird filename even if our static heuristic doesn't."""
+    repo = tmp_path / "repo"
+    origin = tmp_path / "origin.git"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--bare", str(origin)], check=True, capture_output=True
+    )
+    _run(["git", "init", "-b", "main"], repo)
+    _run(["git", "config", "user.email", "t@t"], repo)
+    _run(["git", "config", "user.name", "t"], repo)
+    _run(["git", "remote", "add", "origin", str(origin)], repo)
+    (repo / "README.md").write_text("# base\n")
+    _run(["git", "add", "-A"], repo)
+    _run(["git", "commit", "-m", "init"], repo)
+    _run(["git", "push", "-u", "origin", "main"], repo)
+
+    _run(["git", "checkout", "-b", "DEV-2"], repo)
+    # File name is bland and would NOT be caught by the heuristic
+    (repo / "weird_notes_for_me.txt").write_text("- TODO\n- brainstorm\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "real.py").write_text("x = 1\n")
+    _run(["git", "add", "-A"], repo)
+    _run(["git", "commit", "-m", "DEV-2"], repo)
+
+    # Heuristic alone would miss weird_notes_for_me.txt;
+    # LLM triage flags it, then the deep stage removes it.
+    triage = '{"fishy": ["weird_notes_for_me.txt"]}'
+    deep = '[{"path": "weird_notes_for_me.txt", "action": "remove", "reason": "personal notes"}]'
+    sanitizer, _, llm = _make_sanitizer(repo, deep, triage_text=triage)
+
+    summary = sanitizer.run(
+        issue_key="DEV-2",
+        issue_description="Add real feature.",
+        branch_name="DEV-2",
+    )
+    assert summary["removed"] == ["weird_notes_for_me.txt"]
+    assert not (repo / "weird_notes_for_me.txt").exists()
+    assert (repo / "src" / "real.py").exists()
+    # Both LLM calls were consumed
+    assert llm.run.call_count == 2
+
+
+def test_triage_all_clean_skips_deep_stage(tmp_path):
+    """If triage flags nothing AND heuristic finds nothing, no deep LLM call."""
+    repo = tmp_path / "repo"
+    origin = tmp_path / "origin.git"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--bare", str(origin)], check=True, capture_output=True
+    )
+    _run(["git", "init", "-b", "main"], repo)
+    _run(["git", "config", "user.email", "t@t"], repo)
+    _run(["git", "config", "user.name", "t"], repo)
+    _run(["git", "remote", "add", "origin", str(origin)], repo)
+    (repo / "README.md").write_text("# base\n")
+    _run(["git", "add", "-A"], repo)
+    _run(["git", "commit", "-m", "init"], repo)
+    _run(["git", "push", "-u", "origin", "main"], repo)
+
+    _run(["git", "checkout", "-b", "DEV-3"], repo)
+    (repo / "src").mkdir()
+    (repo / "src" / "real.py").write_text("x = 1\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_real.py").write_text("def test_x():\n    pass\n")
+    _run(["git", "add", "-A"], repo)
+    _run(["git", "commit", "-m", "DEV-3"], repo)
+
+    sanitizer, _, llm = _make_sanitizer(
+        repo, llm_text="[]", triage_text='{"fishy": []}'
+    )
+    summary = sanitizer.run(
+        issue_key="DEV-3",
+        issue_description="",
+        branch_name="DEV-3",
+    )
+    assert summary["removed"] == []
+    assert summary["candidates"] == 0
+    # Only the triage call happened; deep stage was skipped
+    assert llm.run.call_count == 1
 
 
 def test_run_no_added_files_skips_llm(tmp_path):
