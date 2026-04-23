@@ -15,7 +15,14 @@ class Config:
     github_token: str
     github_repo: str
 
+    # Absolute path to the local working clone of github_repo.
+    # If not set in the environment, load_config() derives it from workspace_dir
+    # and github_repo, and RepoManager will self-bootstrap the clone via
+    # HTTPS+token on startup.
     target_repo_path: str
+
+    # Root under which self-bootstrapped target repo clones live
+    workspace_dir: str
 
     # Azure OpenAI configuration (the AI brain)
     azure_openai_endpoint: str   # Full URL including api-version
@@ -53,6 +60,18 @@ def load_config() -> Config:
     deployments_raw = os.environ.get("AZURE_DEPLOYMENTS", "")
     deployments = [d.strip() for d in deployments_raw.split(",") if d.strip()] if deployments_raw else []
 
+    github_repo = os.environ["GITHUB_REPO"]
+    workspace_dir = os.environ.get(
+        "BRAD_WORKSPACE_DIR",
+        str(Path.home() / ".brad" / "workspaces"),
+    )
+
+    # target_repo_path is optional. If not provided, derive a default under
+    # workspace_dir. RepoManager handles clone-if-missing.
+    target_repo_path = os.environ.get("TARGET_REPO_PATH") or str(
+        Path(workspace_dir) / github_repo.replace("/", "-")
+    )
+
     return Config(
         jira_url=os.environ["JIRA_URL"],
         jira_token=os.environ["JIRA_TOKEN"],
@@ -60,9 +79,10 @@ def load_config() -> Config:
         jira_project_key=os.environ.get("JIRA_PROJECT_KEY", "DEV"),
 
         github_token=os.environ["GITHUB_TOKEN"],
-        github_repo=os.environ["GITHUB_REPO"],
+        github_repo=github_repo,
 
-        target_repo_path=os.environ["TARGET_REPO_PATH"],
+        target_repo_path=target_repo_path,
+        workspace_dir=workspace_dir,
 
         azure_openai_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT", ""),
         azure_openai_api_key=os.environ.get("AZURE_OPENAI_API_KEY", ""),
@@ -94,16 +114,26 @@ def load_config() -> Config:
 
 
 def validate_config(cfg: Config) -> None:
-    """Validate that all required paths and credentials exist."""
+    """Validate that all required paths and credentials exist.
+
+    target_repo_path is NOT required to exist here: RepoManager will clone it
+    on demand via HTTPS+github_token. We only validate that the parent directory
+    can be created.
+    """
     errors = []
 
     repo_path = Path(cfg.target_repo_path)
 
-    if not repo_path.exists():
-        errors.append(f"Target repo path does not exist: {cfg.target_repo_path}")
+    # If the path exists, it must be a git repo. If it doesn't exist,
+    # RepoManager will bootstrap a clone there.
+    if repo_path.exists() and not (repo_path / ".git").exists():
+        errors.append(f"Target repo path exists but is not a git repository: {cfg.target_repo_path}")
 
-    if not (repo_path / ".git").exists():
-        errors.append(f"Target repo path is not a git repository: {cfg.target_repo_path}")
+    # Ensure parent is creatable
+    try:
+        repo_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        errors.append(f"Cannot create parent dir for target_repo_path {repo_path.parent}: {e}")
 
     Path(cfg.attachments_dir).mkdir(parents=True, exist_ok=True)
 

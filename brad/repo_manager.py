@@ -9,12 +9,78 @@ class RepoManager:
     def __init__(self, cfg):
         self.logger = get_logger(__name__)
         self.repo_path = Path(cfg.target_repo_path)
+        self.github_repo = getattr(cfg, "github_repo", "")
+        self.github_token = getattr(cfg, "github_token", "")
         self.logger.info(f"Initialized repo manager for {self.repo_path}")
 
-        if not self.repo_path.exists():
-            raise ValueError(f"Repository path does not exist: {self.repo_path}")
+        self._bootstrap_clone()
+
         if not (self.repo_path / ".git").exists():
             raise ValueError(f"Not a git repository: {self.repo_path}")
+
+        self._ensure_tokenized_origin()
+        self._ensure_git_identity()
+
+    # -------------------------
+    # Bootstrap helpers
+    # -------------------------
+    def _tokenized_origin_url(self) -> Optional[str]:
+        if not self.github_repo or not self.github_token:
+            return None
+        return f"https://x-access-token:{self.github_token}@github.com/{self.github_repo}.git"
+
+    def _bootstrap_clone(self) -> None:
+        """If the target path is missing, clone github_repo into it via HTTPS+token."""
+        if self.repo_path.exists() and (self.repo_path / ".git").exists():
+            return
+
+        url = self._tokenized_origin_url()
+        if url is None:
+            # No way to self-bootstrap; leave the existing error paths to complain.
+            return
+
+        if self.repo_path.exists() and any(self.repo_path.iterdir()):
+            raise ValueError(
+                f"Cannot clone into non-empty non-git directory: {self.repo_path}"
+            )
+
+        self.repo_path.parent.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Cloning {self.github_repo} into {self.repo_path}")
+        result = subprocess.run(
+            ["git", "clone", url, str(self.repo_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            # Redact the token from any error output
+            safe_err = (result.stderr or "").replace(self.github_token, "<redacted>")
+            raise RuntimeError(
+                f"Failed to clone {self.github_repo} into {self.repo_path}: {safe_err.strip()}"
+            )
+
+    def _ensure_tokenized_origin(self) -> None:
+        """Keep origin pointed at the tokenized HTTPS URL if we have a token.
+        Best-effort: silently skips if git isn't happy (e.g. minimal fixture repos).
+        """
+        url = self._tokenized_origin_url()
+        if url is None:
+            return
+        probe = self._run_git("remote", "get-url", "origin", check=False)
+        if probe.returncode != 0:
+            return
+        if probe.stdout.strip() != url:
+            self._run_git("remote", "set-url", "origin", url, check=False)
+
+    def _ensure_git_identity(self) -> None:
+        """Set a sensible default user.email / user.name if none is configured.
+        Best-effort: silently skips if git isn't happy.
+        """
+        email_probe = self._run_git("config", "user.email", check=False)
+        if email_probe.returncode == 0 and not email_probe.stdout.strip():
+            self._run_git("config", "user.email", "brad@users.noreply.github.com", check=False)
+        name_probe = self._run_git("config", "user.name", check=False)
+        if name_probe.returncode == 0 and not name_probe.stdout.strip():
+            self._run_git("config", "user.name", "Brad", check=False)
 
     # -------------------------
     # Shell helpers
