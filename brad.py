@@ -4,7 +4,9 @@ Brad - Autonomous AI Software Engineer
 Main entry point for the Brad orchestrator.
 """
 
+import os
 import sys
+import time
 import argparse
 from dotenv import load_dotenv
 from brad.config import load_config, validate_config
@@ -20,7 +22,7 @@ def main():
         epilog="""
 Examples:
   python brad.py run --once          # Process issues once
-  python brad.py run --loop          # Process continuously (not yet implemented)
+  python brad.py run --loop          # Process continuously (sleeps LOOP_INTERVAL seconds)
   python brad.py --log-level DEBUG   # Enable debug logging
         """
     )
@@ -40,7 +42,7 @@ Examples:
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="Run continuously (not yet implemented)"
+        help="Run continuously, sleeping LOOP_INTERVAL seconds between iterations (default 300)"
     )
 
     parser.add_argument(
@@ -96,8 +98,17 @@ Examples:
     try:
         if args.command == "run":
             if args.loop:
-                logger.error("Loop mode not yet implemented")
-                sys.exit(1)
+                loop_interval = int(os.environ.get("LOOP_INTERVAL", "300"))
+                logger.info(f"Starting loop mode (interval: {loop_interval}s)")
+                while True:
+                    try:
+                        orchestrator.run_once()
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        logger.error(f"run_once failed: {e}", exc_info=True)
+                    logger.info(f"Loop: sleeping {loop_interval}s")
+                    time.sleep(loop_interval)
             else:
                 orchestrator.run_once()
 
