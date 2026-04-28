@@ -63,7 +63,10 @@ def test_repo_manager_self_bootstraps_clone(tmp_path):
 
     assert any(c[:2] == ["git", "clone"] for c in clone_calls)
     clone_cmd = next(c for c in clone_calls if c[:2] == ["git", "clone"])
-    assert clone_cmd[2] == "https://x-access-token:fake-token@github.com/flaerobotics/bea.git"
+    assert (
+        clone_cmd[2]
+        == "https://x-access-token:fake-token@github.com/flaerobotics/bea.git"
+    )
 
 
 def test_run_git_success(repo_manager):
@@ -104,22 +107,59 @@ def test_prepare_branch(repo_manager):
         # We can't easily verify the exact calls without more complex mocking
 
 
-def test_checkout_branch_existing(repo_manager):
-    """Test checking out an existing branch."""
-    mock_result_branch = Mock()
-    mock_result_branch.returncode = 0
-    mock_result_branch.stdout = "* main\n  DEV-123\n"
-    mock_result_branch.stderr = ""
+def _git_result(stdout="", returncode=0):
+    m = Mock()
+    m.returncode = returncode
+    m.stdout = stdout
+    m.stderr = ""
+    return m
 
-    mock_result_checkout = Mock()
-    mock_result_checkout.returncode = 0
-    mock_result_checkout.stdout = ""
-    mock_result_checkout.stderr = ""
 
-    with patch(
-        "subprocess.run", side_effect=[mock_result_branch, mock_result_checkout]
-    ):
+def test_checkout_branch_existing_syncs_with_remote(repo_manager):
+    """Existing local branch should be hard-reset to origin/<branch> to avoid stale tips."""
+    branch_list = _git_result("* main\n  DEV-123\n")
+    checkout = _git_result()
+    ls_remote = _git_result("abc123\trefs/heads/DEV-123\n")  # remote exists
+    fetch = _git_result()
+    reset = _git_result()
+
+    calls = []
+
+    def fake_run(cmd, *a, **kw):
+        calls.append(cmd)
+        # Order: branch, checkout -f, ls-remote (branch_exists_remote),
+        # fetch, reset --hard
+        return [branch_list, checkout, ls_remote, fetch, reset][len(calls) - 1]
+
+    with patch("subprocess.run", side_effect=fake_run):
         repo_manager.checkout_branch("DEV-123")
+
+    # Verify the sync happened
+    flat = [" ".join(c) for c in calls]
+    assert any("checkout -f DEV-123" in c for c in flat)
+    assert any("ls-remote --heads origin DEV-123" in c for c in flat)
+    assert any("fetch origin DEV-123" in c for c in flat)
+    assert any("reset --hard origin/DEV-123" in c for c in flat)
+
+
+def test_checkout_branch_existing_skips_sync_when_no_remote(repo_manager):
+    """Local-only branch should not attempt to fetch/reset against a missing remote ref."""
+    branch_list = _git_result("* main\n  local-only\n")
+    checkout = _git_result()
+    ls_remote = _git_result("")  # remote does not exist
+
+    calls = []
+
+    def fake_run(cmd, *a, **kw):
+        calls.append(cmd)
+        return [branch_list, checkout, ls_remote][len(calls) - 1]
+
+    with patch("subprocess.run", side_effect=fake_run):
+        repo_manager.checkout_branch("local-only")
+
+    flat = [" ".join(c) for c in calls]
+    assert not any("fetch origin local-only" in c for c in flat)
+    assert not any("reset --hard origin/local-only" in c for c in flat)
 
 
 def test_checkout_branch_not_exists(repo_manager):

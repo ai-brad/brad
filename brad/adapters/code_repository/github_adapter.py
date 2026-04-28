@@ -283,22 +283,31 @@ class GitHubAdapter(CodeRepositoryAdapter):
             return []
 
     def reply_to_review_comment(self, pr_number: int, comment_id: int, body: str) -> Dict:
-        """Reply to a review comment."""
+        """Reply to a review comment in-thread.
+
+        Uses GitHub's dedicated reply endpoint (``POST .../comments/{id}/replies``)
+        which is the only reliable way to thread a reply.  The legacy
+        ``POST .../comments`` + ``in_reply_to`` form silently creates a detached
+        top-level comment when threading fails, which manifests as "replies
+        never appear" on the PR.
+        """
         self.logger.info(f"Replying to comment {comment_id} on PR #{pr_number}")
         try:
-            payload = {
-                "body": body,
-                "in_reply_to": comment_id,
-            }
             resp = self._request_with_retry(
                 "post",
-                f"{self.base_url}/pulls/{pr_number}/comments",
-                json=payload,
+                f"{self.base_url}/pulls/{pr_number}/comments/{comment_id}/replies",
+                json={"body": body},
             )
             resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            self.logger.exception("Failed to reply to comment")
+            data = resp.json()
+            self.logger.info(
+                f"Successfully replied to comment {comment_id} (new id={data.get('id')})"
+            )
+            return data
+        except Exception:
+            self.logger.exception(
+                f"Failed to reply to comment {comment_id} on PR #{pr_number}"
+            )
             raise
 
     def close_pr(self, pr_number: int, comment: Optional[str] = None) -> None:

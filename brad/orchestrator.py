@@ -15,7 +15,7 @@ from brad.adapters.ticketing.jira_adapter import JiraAdapter
 from brad.adapters.code_repository.github_adapter import GitHubAdapter
 from brad.adapters.ci_cd.github_actions_adapter import GitHubActionsAdapter
 from brad.adapters.observability.azure_adapter import AzureObservabilityAdapter
-from brad.adapters.llm.azure_openai_adapter import AzureOpenAIAdapter
+from brad.adapters.harness import build_harness
 from brad.agents.interface import AIAgentInterface
 from brad.repo_manager import RepoManager
 from brad.adf_parser import adf_to_text
@@ -58,8 +58,8 @@ class BradOrchestrator:
         self.code_repo = GitHubAdapter(cfg)
         self.ci = GitHubActionsAdapter(cfg)
         self.observability = AzureObservabilityAdapter(cfg)
-        llm = AzureOpenAIAdapter(cfg)
-        self.agent = AIAgentInterface(llm, cfg)
+        harness = build_harness(cfg)
+        self.agent = AIAgentInterface(harness, cfg)
         self.repo = RepoManager(cfg)
 
         # Model identity for cache keys
@@ -560,16 +560,17 @@ class BradOrchestrator:
                 cost_budget=float(self.cfg.__dict__.get("cost_budget")),
             )
 
-            # Step 4: Close stale PRs from previous executions of the same issue
-            self._set_phase(state, "closing_stale_prs", "Checking for old PRs to close")
-            self._close_stale_prs(state)
-
-            # Step 5: If branch already exists remotely, clean up for fresh start
-            if self.repo.branch_exists_remote(branch_name):
-                try:
-                    self.repo._run_git("push", "origin", "--delete", branch_name, check=False)
-                except Exception as e:
-                    self.logger.warning(f"{issue_key}: Could not delete remote branch: {e}")
+            # Step 4: Detect existing PR — continue on it instead of restarting.
+            # To force a fresh start, close the PR and delete the branch manually before re-labeling.
+            self._set_phase(state, "checking_existing_pr", "Checking for existing PR to continue")
+            existing_pr = self.code_repo.pr_exists_for_branch(branch_name)
+            if existing_pr:
+                self.logger.info(f"{issue_key}: Continuing work on existing PR #{existing_pr}")
+                self.ticketing.comment(
+                    issue_key,
+                    f"Brad is continuing work on existing PR #{existing_pr}. "
+                    f"To restart from scratch, close the PR and delete the `{branch_name}` branch before re-applying the label."
+                )
 
             self._handle_implementation_phase(state)
 
@@ -588,19 +589,6 @@ class BradOrchestrator:
             db.update_execution_phase(execution_id, "error", str(e)[:200])
             db.finish_execution(execution_id, status="error", error_message=str(e)[:500])
             raise
-
-    def _close_stale_prs(self, state: IssueState):
-        """Close any open PRs from previous executions of the same JIRA issue."""
-        try:
-            existing_pr = self.code_repo.pr_exists_for_branch(state.branch_name)
-            if existing_pr:
-                self.logger.info(f"{state.issue_key}: Closing stale PR #{existing_pr} from previous execution")
-                self.code_repo.close_pr(
-                    existing_pr,
-                    f"Superseded by execution #{state.execution_id}. Brad is re-processing {state.issue_key}."
-                )
-        except Exception as e:
-            self.logger.warning(f"{state.issue_key}: Could not close stale PR: {e}")
 
     def _handle_requirements_phase(self, state: IssueState):
         """Handle requirements analysis phase."""

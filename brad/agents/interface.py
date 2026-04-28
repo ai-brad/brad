@@ -11,23 +11,23 @@ import subprocess
 from typing import Dict, List, Optional
 from pathlib import Path
 from brad.logging_config import get_logger
-from brad.adapters.llm.base import LLMAdapter
+from brad.adapters.harness import AgentHarness
 from brad.codebase_map import get_codebase_map
 
 
 class AIAgentInterface:
     """
-    AI agent interface powered by an LLM adapter.
+    AI agent interface powered by a swappable :class:`AgentHarness`.
     Supports warm-start: pass previous_response_id to continue conversation context.
     """
 
     _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
     MAX_PR_DIFF_LENGTH = 8000  # Characters - truncate to avoid exceeding context limits
 
-    def __init__(self, llm: LLMAdapter, cfg):
+    def __init__(self, harness: AgentHarness, cfg):
         self.logger = get_logger(__name__)
         self.cfg = cfg
-        self.llm = llm
+        self.harness = harness
         self._prompt_cache: Dict[str, str] = {}
 
     def _load_prompt(self, name: str) -> str:
@@ -57,7 +57,7 @@ class AIAgentInterface:
         self.logger.info(f"Requirements analysis: {issue_key} (iteration {iteration})")
         prompt = self._build_requirements_prompt(issue_key, description, attachment_paths, iteration)
         codebase_map = get_codebase_map(repo_path)
-        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_requirements_response(result.text)
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
@@ -78,7 +78,7 @@ class AIAgentInterface:
         pre_search = self._pre_search_codebase(description, repo_path)
         prompt = self._build_implementation_prompt(issue_key, description, attachment_paths, branch_name, iteration, pre_search, dev_instructions)
         codebase_map = get_codebase_map(repo_path)
-        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_implementation_response(result.text)
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
@@ -99,7 +99,7 @@ class AIAgentInterface:
         self.logger.info(f"Review fix: {issue_key} PR#{pr_number} (iteration {iteration})")
         prompt = self._build_review_fix_prompt(issue_key, description, review_comments, pr_number, iteration, dev_instructions)
         codebase_map = get_codebase_map(repo_path)
-        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_review_fix_response(result.text)
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
@@ -125,7 +125,7 @@ class AIAgentInterface:
             failed_test_target=failed_test_target, dev_instructions=dev_instructions,
         )
         codebase_map = get_codebase_map(repo_path)
-        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_ci_fix_response(result.text)
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
@@ -141,7 +141,7 @@ class AIAgentInterface:
     ) -> Dict:
         self.logger.info(f"Local review: {issue_key} on branch {branch_name}")
         prompt = self._build_local_review_prompt(issue_key, description, diff, branch_name)
-        result = self.llm.run(prompt, repo_path)
+        result = self.harness.run(prompt, repo_path)
         parsed = self._parse_local_review_response(result.text)
         parsed["_usage"] = result.usage
         return parsed
@@ -160,7 +160,7 @@ class AIAgentInterface:
         self.logger.info(f"Local review fix: {issue_key} on branch {branch_name} (iteration {iteration})")
         prompt = self._build_local_review_fix_prompt(issue_key, description, review_feedback, branch_name, iteration, dev_instructions)
         codebase_map = get_codebase_map(repo_path)
-        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_local_review_fix_response(result.text)
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
@@ -178,7 +178,7 @@ class AIAgentInterface:
         self.logger.info(f"Code review reader: PR #{pr_number}, comment by {comment.get('user', {}).get('login', 'unknown')}")
         prompt = self._build_code_review_reader_prompt(pr_number, branch_name, comment)
         codebase_map = get_codebase_map(repo_path)
-        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_code_review_reader_response(result.text)
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
@@ -198,7 +198,7 @@ class AIAgentInterface:
         self.logger.info(f"Code review reader (batch): PR #{pr_number}, {len(comments)} comments")
         prompt = self._build_code_review_reader_batch_prompt(pr_number, branch_name, comments, dev_instructions, pr_diff=pr_diff)
         codebase_map = get_codebase_map(repo_path)
-        result = self.llm.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
+        result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_code_review_reader_batch_response(result.text, comments)
         parsed["_response_id"] = result.response_id
         parsed["_usage"] = result.usage
