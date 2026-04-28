@@ -70,7 +70,10 @@ class Config:
     codex_bin: str = "codex"
     codex_model: Optional[str] = None
     codex_sandbox: str = "workspace-write"
-    codex_approval: str = "never"
+    # ``danger`` => --dangerously-bypass-approvals-and-sandbox.  Required because
+    # the implementation prompt asks the agent to push branches and open PRs,
+    # both of which need network + .git writes that --full-auto blocks.
+    codex_approval: str = "danger"
     codex_timeout: int = 3600
 
 
@@ -135,7 +138,7 @@ def load_config() -> Config:
         codex_bin=os.environ.get("CODEX_BIN", "codex"),
         codex_model=os.environ.get("CODEX_MODEL") or None,
         codex_sandbox=os.environ.get("CODEX_SANDBOX", "workspace-write"),
-        codex_approval=os.environ.get("CODEX_APPROVAL", "full-auto"),
+        codex_approval=os.environ.get("CODEX_APPROVAL", "danger"),
         codex_timeout=int(os.environ.get("CODEX_TIMEOUT", "3600")),
     )
 

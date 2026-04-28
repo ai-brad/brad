@@ -159,8 +159,8 @@ class TestCodexCliHarnessInvocation:
         assert "exec" in argv
         assert "--cd" in argv
         assert str(tmp_path) in argv
-        # Default approval mode is full-auto, which translates to a single flag.
-        assert "--full-auto" in argv
+        # Default approval mode is 'danger' so the agent can git push / gh pr create.
+        assert "--dangerously-bypass-approvals-and-sandbox" in argv
         # The deprecated/non-existent flag must NOT be passed.
         assert "--ask-for-approval" not in argv
         # JSONL streaming is always on.

@@ -63,7 +63,11 @@ class CodexCliHarness(AgentHarness):
         # are ``--full-auto`` (sandboxed, no prompts) and
         # ``--dangerously-bypass-approvals-and-sandbox`` (no sandbox, no prompts).
         # The legacy ``--ask-for-approval`` flag does NOT exist on ``codex exec``.
-        self.approval = (getattr(cfg, "codex_approval", None) or "full-auto").lower()
+        #
+        # Default is ``danger`` because brad's implementation prompt instructs
+        # the agent to ``git push`` and ``gh pr create`` itself — both require
+        # network egress and ``.git`` writes that ``--full-auto`` blocks.
+        self.approval = (getattr(cfg, "codex_approval", None) or "danger").lower()
         self.timeout = int(getattr(cfg, "codex_timeout", 0) or 3600)
 
         if shutil.which(self.bin) is None:
@@ -203,12 +207,15 @@ class CodexCliHarness(AgentHarness):
             return ["--dangerously-bypass-approvals-and-sandbox"]
         if approval in ("sandbox-only", "sandbox_only", "sandbox"):
             return ["--sandbox", self.sandbox]
-        # Default: full-auto (sandboxed, non-interactive).
-        if approval not in ("full-auto", "full_auto", "auto", "never", ""):
+        if approval in ("full-auto", "full_auto", "auto"):
+            return ["--full-auto"]
+        # Default: danger (no sandbox, full network) — see __init__ for rationale.
+        if approval not in ("danger", "never", ""):
             self.logger.warning(
-                f"Unknown codex_approval={approval!r}; falling back to --full-auto"
+                f"Unknown codex_approval={approval!r}; falling back to "
+                f"--dangerously-bypass-approvals-and-sandbox"
             )
-        return ["--full-auto"]
+        return ["--dangerously-bypass-approvals-and-sandbox"]
 
     @staticmethod
     def _build_prompt(system_prompt: str, task_prompt: str) -> str:
