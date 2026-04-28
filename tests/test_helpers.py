@@ -1,4 +1,5 @@
 """Shared test helpers for creating Config objects with all required fields."""
+
 from brad.config import Config
 
 
@@ -12,6 +13,7 @@ def make_test_config(tmp_path, **overrides):
         github_token="gh-token",
         github_repo="owner/repo",
         target_repo_path=str(tmp_path),
+        workspace_dir=str(tmp_path / "workspaces"),
         azure_openai_endpoint="https://test.openai.azure.com/openai/responses?api-version=2025-04-01-preview",
         azure_openai_api_key="test-key",
         azure_openai_model="gpt-4o",
