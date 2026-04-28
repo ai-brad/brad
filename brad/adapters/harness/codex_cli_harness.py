@@ -12,13 +12,15 @@ Warm-start (``previous_response_id``) is intentionally a no-op for v1: each
 task is a fresh session.  The ``codex resume`` mechanism can be wired later if
 useful — see TODO at the end of the file.
 """
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from brad.adapters.harness.base import AgentHarness, LLMResult, LLMUsage
 from brad.logging_config import get_logger
@@ -97,6 +99,7 @@ class CodexCliHarness(AgentHarness):
                 "--cd", repo_path,
                 "--skip-git-repo-check",
                 "--output-last-message", str(last_msg_path),
+                "--json",  # stream JSONL events on stdout for live visibility
             ]
             if self.model:
                 argv.extend(["--model", self.model])
@@ -108,16 +111,17 @@ class CodexCliHarness(AgentHarness):
 
             session_id = uuid.uuid4().hex  # placeholder so callers can correlate logs
             try:
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     argv,
-                    input=full_prompt,
-                    capture_output=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     cwd=repo_path,
-                    timeout=self.timeout,
                     env=os.environ.copy(),
                     encoding="utf-8",
                     errors="replace",
+                    bufsize=1,  # line-buffered
                 )
             except FileNotFoundError:
                 msg = (
@@ -126,16 +130,44 @@ class CodexCliHarness(AgentHarness):
                 )
                 self.logger.error(msg)
                 return LLMResult(text=msg, response_id=None, usage=LLMUsage())
+
+            # Drain stderr in a background thread so codex doesn't block on a
+            # full pipe; we keep the tail for error reporting.
+            stderr_buf: List[str] = []
+
+            def _drain_stderr():
+                assert proc.stderr is not None
+                for line in proc.stderr:
+                    stderr_buf.append(line)
+
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
+            # Send the prompt then close stdin so codex starts processing.
+            try:
+                assert proc.stdin is not None
+                proc.stdin.write(full_prompt)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+
+            usage = LLMUsage()
+            try:
+                self._stream_events(proc, usage)
+                proc.wait(timeout=self.timeout)
             except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
                 msg = f"ERROR: codex exec timed out after {self.timeout}s"
                 self.logger.error(msg)
-                return LLMResult(text=msg, response_id=session_id, usage=LLMUsage())
+                return LLMResult(text=msg, response_id=session_id, usage=usage)
+            finally:
+                stderr_thread.join(timeout=2)
 
-            text = self._extract_final_text(last_msg_path, proc)
+            text = self._extract_final_text(last_msg_path)
 
             if proc.returncode != 0 and not text.strip():
-                # Surface stderr so debugging is possible from logs alone.
-                stderr_tail = (proc.stderr or "").strip()[-2000:]
+                stderr_tail = "".join(stderr_buf).strip()[-2000:]
                 text = (
                     f"ERROR: codex exec exited with code {proc.returncode}.\n"
                     f"STDERR (tail):\n{stderr_tail}"
@@ -144,9 +176,11 @@ class CodexCliHarness(AgentHarness):
 
             self.logger.info(
                 f"=== CodexCliHarness finished (exit={proc.returncode}, "
-                f"final={len(text)} chars) ==="
+                f"final={len(text)} chars, "
+                f"tokens in={usage.prompt_tokens}/cached={usage.cached_tokens}/"
+                f"out={usage.completion_tokens}) ==="
             )
-            return LLMResult(text=text, response_id=session_id, usage=LLMUsage())
+            return LLMResult(text=text, response_id=session_id, usage=usage)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -192,13 +226,12 @@ class CodexCliHarness(AgentHarness):
         return "\n\n".join(parts) + "\n"
 
     @staticmethod
-    def _extract_final_text(last_msg_path: Path, proc: subprocess.CompletedProcess) -> str:
-        """Prefer ``--output-last-message`` content; fall back to stdout.
+    def _extract_final_text(last_msg_path: Path) -> str:
+        """Read the final assistant message from ``--output-last-message``.
 
-        Older Codex CLI versions don't write the file (they may even reject the
-        flag); in that case ``--output-last-message`` was already passed and
-        Codex would have errored out.  Any future divergence is surfaced via
-        stdout fallback.
+        With ``--json`` mode active, codex still writes the final message to
+        the path passed via ``--output-last-message``.  Stdout in that mode is
+        the JSONL event stream and is consumed by :meth:`_stream_events`.
         """
         try:
             if last_msg_path.exists():
@@ -207,7 +240,67 @@ class CodexCliHarness(AgentHarness):
                     return content
         except Exception:
             pass
-        return (proc.stdout or "").strip()
+        return ""
+
+    def _stream_events(self, proc: subprocess.Popen, usage: LLMUsage) -> None:
+        """Consume codex's JSONL stdout, mirroring key events to brad's logger.
+
+        Codex emits one JSON object per line under ``--json``.  The relevant
+        payload types we surface are:
+
+        * ``agent_message`` / ``agent_reasoning`` — log a truncated preview.
+        * ``exec_command_begin`` — log the shell command codex is about to run.
+        * ``patch_apply_begin`` — log the files codex is patching.
+        * ``token_count`` — accumulate into the returned :class:`LLMUsage`.
+        * ``error`` — log at error level.
+
+        Any unparseable lines are ignored silently — codex may emit non-JSON
+        diagnostics on stdout in some failure modes.
+        """
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload: Dict[str, Any] = evt.get("payload") or {}
+            ptype = payload.get("type") or evt.get("type") or ""
+
+            if ptype == "agent_message":
+                msg = (payload.get("message") or "").strip()
+                if msg:
+                    self.logger.info(f"[codex] {msg[:500]}")
+            elif ptype == "agent_reasoning":
+                text = (payload.get("text") or "").strip()
+                if text:
+                    self.logger.info(f"[codex:reasoning] {text[:300]}")
+            elif ptype == "exec_command_begin":
+                cmd = payload.get("command") or []
+                if isinstance(cmd, list):
+                    cmd_str = " ".join(str(c) for c in cmd)
+                else:
+                    cmd_str = str(cmd)
+                self.logger.info(f"[codex:$] {cmd_str[:300]}")
+            elif ptype == "patch_apply_begin":
+                changes = payload.get("changes") or {}
+                if isinstance(changes, dict) and changes:
+                    self.logger.info(f"[codex:patch] {', '.join(list(changes.keys())[:5])[:300]}")
+            elif ptype == "token_count":
+                info = payload.get("info") or {}
+                total = info.get("total_token_usage") or {}
+                if total:
+                    usage.prompt_tokens = total.get("input_tokens") or usage.prompt_tokens
+                    usage.cached_tokens = total.get("cached_input_tokens") or usage.cached_tokens
+                    usage.completion_tokens = total.get("output_tokens") or usage.completion_tokens
+                    usage.total_tokens = (
+                        (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
+                    )
+            elif ptype == "error":
+                err = payload.get("message") or json.dumps(payload)[:300]
+                self.logger.error(f"[codex:error] {err}")
 
 
 # TODO(harness/warm-start): wire `codex resume <session_id>` once we capture
