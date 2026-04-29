@@ -541,6 +541,69 @@ class BradOrchestrator:
         if pushed:
             self._watch_ci_after_push(pr_number, branch_name)
 
+    def _fetch_issue_goal(self, issue_key: str) -> str:
+        """Best-effort: pull summary + description from Jira as plain text.
+
+        Returns an empty string on any failure — we never want CI follow-up to
+        fall over because Jira is flaky or the branch name doesn't map to a
+        real issue.
+        """
+        try:
+            issue = self.ticketing.fetch_issue(issue_key)
+        except Exception as e:
+            self.logger.warning(f"fetch_issue({issue_key}) raised: {e}")
+            return ""
+        if not issue:
+            return ""
+        fields = issue.get("fields", {}) or {}
+        summary = (fields.get("summary") or "").strip()
+        raw_desc = fields.get("description")
+        try:
+            desc_text = adf_to_text(raw_desc) if raw_desc else ""
+        except Exception as e:
+            self.logger.warning(f"Could not render description for {issue_key}: {e}")
+            desc_text = ""
+        parts = []
+        if summary:
+            parts.append(f"## Original goal: {issue_key}\n{summary}")
+        if desc_text.strip():
+            parts.append(desc_text.strip())
+        return "\n\n".join(parts)
+
+    def _summarize_prior_activity(self, issue_key: str, max_chars: int = 1500) -> str:
+        """Build a short bullet-list digest of prior brad executions/steps for this issue."""
+        try:
+            executions = db.get_executions_by_issue(issue_key)
+        except Exception as e:
+            self.logger.debug(f"Could not fetch executions for {issue_key}: {e}")
+            return ""
+        if not executions:
+            return ""
+
+        lines: List[str] = []
+        # Walk from oldest to newest so the agent reads chronologically.
+        for execution in reversed(executions):
+            exec_id = execution.get("id")
+            started = execution.get("started_at", "")
+            status = execution.get("status", "")
+            lines.append(f"- Execution #{exec_id} [{started}] status={status}")
+            try:
+                steps = db.get_execution_steps(exec_id) if exec_id else []
+            except Exception:
+                steps = []
+            for step in steps:
+                phase = step.get("phase", "?")
+                step_status = step.get("status", "?")
+                summary = (step.get("result_summary") or "").strip().replace("\n", " ")
+                if len(summary) > 200:
+                    summary = summary[:200] + "…"
+                lines.append(f"    • {phase} ({step_status}): {summary}" if summary else f"    • {phase} ({step_status})")
+
+        digest = "\n".join(lines)
+        if len(digest) > max_chars:
+            digest = digest[: max_chars - 1] + "…"
+        return digest
+
     def _watch_ci_after_push(self, pr_number: int, branch_name: str) -> None:
         """Watch CI on a PR after a review-driven push and auto-fix failures.
 
@@ -555,6 +618,20 @@ class BradOrchestrator:
         # for traceability — Jira just won't recognize the comment target.
         issue_key = branch_name
 
+        # Recover the original goal so the CI-fix agent isn't blind to intent.
+        goal_text = self._fetch_issue_goal(issue_key)
+
+        # Surface what brad has already tried on this issue, so retries don't
+        # blindly redo earlier failed strategies.
+        history_text = self._summarize_prior_activity(issue_key)
+
+        description_parts = []
+        if goal_text:
+            description_parts.append(goal_text)
+        if history_text:
+            description_parts.append("## Prior brad activity on this issue\n" + history_text)
+        synthesized_description = "\n\n".join(description_parts)
+
         try:
             execution_id = db.create_execution(issue_key, f"Review-driven CI watch on PR #{pr_number}")
         except Exception as e:
@@ -563,7 +640,7 @@ class BradOrchestrator:
 
         state = IssueState(
             issue_key=issue_key,
-            description="",  # Not available outside the implementation flow.
+            description=synthesized_description,
             attachments=[],
             attachment_paths=[],
             branch_name=branch_name,
