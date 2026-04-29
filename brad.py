@@ -53,8 +53,12 @@ Examples:
 
     args = parser.parse_args()
 
-    # Load .env file
-    load_dotenv()
+    # Load .env file.  By default override=True so values in .env always win
+    # over a stale shell session (e.g. AZURE_OPENAI_API_KEY exported in
+    # ~/.bashrc that has since been rotated).  Set BRAD_DOTENV_OVERRIDE=false
+    # to let the shell environment take precedence instead.
+    _dotenv_override = os.environ.get("BRAD_DOTENV_OVERRIDE", "true").lower() != "false"
+    load_dotenv(override=_dotenv_override)
 
     # Load configuration
     try:

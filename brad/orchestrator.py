@@ -242,33 +242,31 @@ class BradOrchestrator:
 
     def _rebase_open_prs(self):
         """Rebase all open Brad PRs that are behind main, skipping those with conflicts."""
-        brad_prs = db.get_open_brad_prs()
+        brad_prs = self.code_repo.get_brad_prs()
         if not brad_prs:
             self.logger.info("No open Brad PRs to rebase")
             return
 
         self.logger.info(f"Checking {len(brad_prs)} Brad PRs for rebase")
-        for pr_info in brad_prs:
-            pr_number = pr_info["pr_number"]
-            issue_key = pr_info["issue_key"]
-            
+        for pr in brad_prs:
+            pr_number = pr['number']
+            branch_name = pr.get('head', {}).get('ref', '')
+
             try:
-                pr = self.code_repo.get_pr(pr_number)
-                branch_name = pr.get('head', {}).get('ref', '')
                 if not branch_name:
-                    raise ValueError(f"PR #{pr_number} ({issue_key}) has no branch name")
-                    
+                    raise ValueError(f"PR #{pr_number} has no branch name")
+
                 result = self.repo.rebase_branch(branch_name, base_branch="main")
                 if result.get("rebased"):
-                    self.logger.info(f"Rebased PR #{pr_number} ({issue_key})")
+                    self.logger.info(f"Rebased PR #{pr_number} ({branch_name})")
                 elif result.get("up_to_date"):
-                    self.logger.debug(f"PR #{pr_number} ({issue_key}) already up to date")
+                    self.logger.debug(f"PR #{pr_number} ({branch_name}) already up to date")
                 elif result.get("conflict"):
-                    self.logger.warning(f"PR #{pr_number} ({issue_key}) has rebase conflicts, skipping")
+                    self.logger.warning(f"PR #{pr_number} ({branch_name}) has rebase conflicts, skipping")
                 elif result.get("error"):
-                    self.logger.warning(f"PR #{pr_number} ({issue_key}) rebase error: {result['error']}")
+                    self.logger.warning(f"PR #{pr_number} ({branch_name}) rebase error: {result['error']}")
             except Exception as e:
-                self.logger.warning(f"Failed to rebase PR #{pr_number} ({issue_key}): {e}")
+                self.logger.warning(f"Failed to rebase PR #{pr_number} ({branch_name}): {e}")
 
     def _process_review_comments(self):
         """Check all Brad PRs for new review comments (both file-level and PR-level) and process them."""
