@@ -247,6 +247,15 @@ class BradOrchestrator:
             self.logger.info("No open Brad PRs to rebase")
             return
 
+        # Ensure the workspace is clean before iterating. Leftover edits from a
+        # previous run/agent invocation will otherwise make `git checkout` abort
+        # with "local changes would be overwritten", silently skipping rebases
+        # for every PR after the first dirty one.
+        try:
+            self.repo.reset_to_clean_state("main")
+        except Exception as e:
+            self.logger.warning(f"Could not pre-clean workspace before rebase pass: {e}")
+
         self.logger.info(f"Checking {len(brad_prs)} Brad PRs for rebase")
         for pr in brad_prs:
             pr_number = pr['number']
@@ -255,6 +264,15 @@ class BradOrchestrator:
             try:
                 if not branch_name:
                     raise ValueError(f"PR #{pr_number} has no branch name")
+
+                # Defensive: if a prior iteration left the tree dirty (e.g. a
+                # half-applied rebase the abort didn't fully undo), reset before
+                # trying the next branch so one bad PR can't block the others.
+                if not self.repo.is_clean_working_tree():
+                    self.logger.warning(
+                        f"Workspace dirty before rebasing PR #{pr_number}, resetting to main"
+                    )
+                    self.repo.reset_to_clean_state("main")
 
                 result = self.repo.rebase_branch(branch_name, base_branch="main")
                 if result.get("rebased"):
@@ -361,14 +379,23 @@ class BradOrchestrator:
                 self.code_repo.reply_to_review_comment(pr_number, comment_id, prefixed)
 
         # Push once if verified changes exist
+        pushed = False
         if overall_code_changed:
             try:
                 self.repo.push(branch_name, force=False)
+                pushed = True
             except Exception:
                 try:
                     self.repo.push(branch_name, force=True)
+                    pushed = True
                 except Exception as e:
                     self.logger.error(f"Failed to push changes for PR #{pr_number}: {e}")
+
+        # If we pushed code changes in response to review comments, follow the
+        # PR through CI and auto-fix failures — otherwise brad walks away after
+        # replying and never reacts to a red pipeline.
+        if pushed:
+            self._watch_ci_after_push(pr_number, branch_name)
 
     def _get_pr_diff(self, branch_name: str) -> str:
         """Get the diff of the current branch against main."""
@@ -499,14 +526,63 @@ class BradOrchestrator:
                 self.code_repo.reply_to_issue_comment(pr_number, comment_id, prefixed)
 
         # Push once if verified changes exist
+        pushed = False
         if overall_code_changed:
             try:
                 self.repo.push(branch_name, force=False)
+                pushed = True
             except Exception:
                 try:
                     self.repo.push(branch_name, force=True)
+                    pushed = True
                 except Exception as e:
                     self.logger.error(f"Failed to push changes for PR #{pr_number}: {e}")
+
+        if pushed:
+            self._watch_ci_after_push(pr_number, branch_name)
+
+    def _watch_ci_after_push(self, pr_number: int, branch_name: str) -> None:
+        """Watch CI on a PR after a review-driven push and auto-fix failures.
+
+        The review-comments path runs without a Jira-driven `IssueState`/execution,
+        so we synthesize one here and reuse the existing CI monitoring + fix loop
+        (`_handle_ci_monitoring` → `_handle_ci_fix`). Without this, brad replies
+        to comments, pushes a fix, and then walks away even if the new commit
+        breaks the pipeline.
+        """
+        # Brad's branches are named after the Jira issue key, so this is a
+        # sensible default. If the convention ever changes this still works
+        # for traceability — Jira just won't recognize the comment target.
+        issue_key = branch_name
+
+        try:
+            execution_id = db.create_execution(issue_key, f"Review-driven CI watch on PR #{pr_number}")
+        except Exception as e:
+            self.logger.warning(f"Could not create execution for CI watch on PR #{pr_number}: {e}")
+            execution_id = 0
+
+        state = IssueState(
+            issue_key=issue_key,
+            description="",  # Not available outside the implementation flow.
+            attachments=[],
+            attachment_paths=[],
+            branch_name=branch_name,
+            execution_id=execution_id,
+            pr_number=pr_number,
+            cost_budget=float(self.cfg.__dict__.get("cost_budget") or 10.0),
+        )
+
+        try:
+            self._handle_ci_monitoring(state)
+            if execution_id:
+                db.finish_execution(execution_id, status="completed", pr_number=pr_number)
+        except Exception as e:
+            self.logger.error(f"CI watch failed for PR #{pr_number}: {e}", exc_info=True)
+            if execution_id:
+                try:
+                    db.finish_execution(execution_id, status="error", error_message=str(e)[:500])
+                except Exception:
+                    pass
 
     def _process_issue(self, issue: Dict):
         """Process a single issue through the Brad workflow."""
