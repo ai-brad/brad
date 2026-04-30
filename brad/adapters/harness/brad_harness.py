@@ -1,22 +1,31 @@
-"""Azure OpenAI LLM adapter with tool-calling agent loop."""
+"""Brad's native agent harness — tool-calling loop on top of an LLMProvider.
+
+This is what used to be ``AzureOpenAIAdapter``.  The Azure-specific HTTP/auth
+code has been extracted into :class:`brad.adapters.llm.azure_openai_provider.AzureOpenAIProvider`;
+this class now contains only the harness concerns: tool definitions, a
+tool-calling loop, tool implementations, and bookkeeping (usage, response ids,
+iteration cap).
+
+It can be paired with any :class:`~brad.adapters.llm.base.LLMProvider`.
+"""
 import json
-import os
 import re
 import subprocess
 import sys
-import time
-import requests as http_requests
-from typing import Dict, List, Optional, Any
 from pathlib import Path
-from brad.adapters.llm.base import LLMAdapter, LLMResult, LLMUsage
+from typing import Any, Dict, List, Optional
+
+from brad.adapters.harness.base import AgentHarness, LLMResult, LLMUsage
+from brad.adapters.llm.base import LLMProvider
 from brad.logging_config import get_logger
 
 
-class AzureOpenAIAdapter(LLMAdapter):
-    """
-    Azure OpenAI Responses API implementation of the LLMAdapter interface.
-    Provides tools for file I/O, command execution, and code search.
-    Runs an agentic loop until the model completes the task.
+class BradHarness(AgentHarness):
+    """Brad's native tool-calling loop.
+
+    Drives any :class:`LLMProvider` through an agentic coding task using a
+    fixed toolset (file I/O, shell, search).  The loop terminates when the
+    model emits a turn with no tool calls.
     """
 
     TOOL_DEFINITIONS = [
@@ -148,14 +157,12 @@ class AzureOpenAIAdapter(LLMAdapter):
     SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.mypy_cache', '.pytest_cache',
                  'dist', 'build', '.tox', '.eggs', '*.egg-info', 'venv', '.venv'}
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, provider: LLMProvider):
         self.logger = get_logger(__name__)
-        self.endpoint = cfg.azure_openai_endpoint
-        self.api_key = cfg.azure_openai_api_key
-        self.model = cfg.azure_openai_model
+        self.cfg = cfg
+        self.provider = provider
         self.max_iterations = 200
-        self.api_timeout = 180  # seconds per API call
-        self.logger.info(f"AzureOpenAIAdapter initialized: model={self.model}")
+        self.logger.info(f"BradHarness initialized: provider={type(provider).__name__}")
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -167,16 +174,13 @@ class AzureOpenAIAdapter(LLMAdapter):
         system_prompt: str = "",
         previous_response_id: Optional[str] = None,
     ) -> LLMResult:
-        """
-        Run an agentic task. Returns LLMResult with text, response_id, and usage.
-        """
-        self.logger.info(f"=== AzureOpenAI task start in {repo_path} ===")
+        """Run an agentic task. Returns LLMResult with text, response_id, and usage."""
+        self.logger.info(f"=== BradHarness task start in {repo_path} ===")
         self.logger.info(f"Task preview: {task_prompt[:300]}...")
 
-        # Accumulate usage across iterations
         total_usage = LLMUsage()
 
-        # Build initial input
+        # Build initial input.
         input_messages: List[Any] = []
         if system_prompt:
             input_messages.append({"role": "developer", "content": system_prompt})
@@ -189,31 +193,30 @@ class AzureOpenAIAdapter(LLMAdapter):
             iteration += 1
             self.logger.info(f"--- Iteration {iteration}/{self.max_iterations} ---")
 
-            api_resp = self._call_api(input_messages, previous_response_id=prev_id)
+            api_resp = self.provider.call(
+                input_messages, self.TOOL_DEFINITIONS, previous_response_id=prev_id
+            )
             if api_resp is None:
                 return LLMResult(
-                    text="ERROR: Azure OpenAI API call failed — check logs for details.",
+                    text="ERROR: LLM provider call failed — check logs for details.",
                     response_id=prev_id,
                     usage=total_usage,
                 )
 
-            # Accumulate usage
-            usage_data = api_resp.get("usage", {})
-            if usage_data:
-                total_usage.prompt_tokens += usage_data.get("input_tokens", 0)
-                total_usage.completion_tokens += usage_data.get("output_tokens", 0)
+            # Accumulate usage.
+            if api_resp.usage:
+                total_usage.prompt_tokens += api_resp.usage.prompt_tokens
+                total_usage.completion_tokens += api_resp.usage.completion_tokens
                 total_usage.total_tokens = total_usage.prompt_tokens + total_usage.completion_tokens
-                # Track cached (prompt-cache-hit) tokens — they cost less
-                input_details = usage_data.get("input_tokens_details", {})
-                if input_details:
-                    total_usage.cached_tokens += input_details.get("cached_tokens", 0)
+                total_usage.cached_tokens += api_resp.usage.cached_tokens
 
-            prev_id = api_resp.get("id")
-            output_items = api_resp.get("output", [])
-            status = api_resp.get("status", "unknown")
-            self.logger.info(f"Response id={prev_id}, status={status}, items={len(output_items)}")
+            prev_id = api_resp.response_id
+            output_items = api_resp.output
+            self.logger.info(
+                f"Response id={prev_id}, status={api_resp.status}, items={len(output_items)}"
+            )
 
-            # Separate tool calls from text
+            # Separate tool calls from text.
             tool_calls = []
             text_parts = []
             for item in output_items:
@@ -227,14 +230,19 @@ class AzureOpenAIAdapter(LLMAdapter):
                 elif t == "text":
                     text_parts.append(item.get("text", ""))
 
-            # If no tool calls, we're done
+            # If no tool calls, we're done.
             if not tool_calls:
                 final = "\n".join(text_parts)
-                self.logger.info(f"=== Agent finished after {iteration} iterations ({len(final)} chars) ===")
-                self.logger.info(f"Total usage: prompt={total_usage.prompt_tokens}, completion={total_usage.completion_tokens}")
+                self.logger.info(
+                    f"=== Agent finished after {iteration} iterations ({len(final)} chars) ==="
+                )
+                self.logger.info(
+                    f"Total usage: prompt={total_usage.prompt_tokens}, "
+                    f"completion={total_usage.completion_tokens}"
+                )
                 return LLMResult(text=final, response_id=prev_id, usage=total_usage)
 
-            # Execute every tool call, build the next input
+            # Execute every tool call, build the next input.
             input_messages = []
             for tc in tool_calls:
                 fname = tc.get("name", "")
@@ -264,55 +272,6 @@ class AzureOpenAIAdapter(LLMAdapter):
             response_id=prev_id,
             usage=total_usage,
         )
-
-    # ------------------------------------------------------------------
-    # API call
-    # ------------------------------------------------------------------
-    def _call_api(self, input_data, previous_response_id=None) -> Optional[Dict]:
-        body: Dict[str, Any] = {
-            "model": self.model,
-            "input": input_data,
-            "tools": self.TOOL_DEFINITIONS,
-            "parallel_tool_calls": True,
-            "max_output_tokens": 16384,
-        }
-        if previous_response_id:
-            body["previous_response_id"] = previous_response_id
-
-        headers = {
-            "Content-Type": "application/json",
-            "api-key": self.api_key,
-        }
-
-        max_retries = 10
-        for attempt in range(max_retries):
-            try:
-                resp = http_requests.post(
-                    self.endpoint, headers=headers, json=body, timeout=self.api_timeout
-                )
-                if resp.status_code == 429:
-                    wait = int(resp.headers.get("Retry-After", str(min(10 * (2 ** attempt), 120))))
-                    self.logger.warning(f"Rate limited, waiting {wait}s (attempt {attempt+1}/{max_retries})")
-                    time.sleep(wait)
-                    continue
-                if resp.status_code != 200:
-                    self.logger.error(f"API {resp.status_code}: {resp.text[:500]}")
-                    return None
-                return resp.json()
-            except (http_requests.exceptions.Timeout, http_requests.exceptions.ConnectionError) as e:
-                self.logger.warning(f"API {type(e).__name__} (attempt {attempt+1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    wait = min(10 * (2 ** attempt), 120)
-                    self.logger.warning(f"Retrying in {wait}s...")
-                    time.sleep(wait)
-                    continue
-                self.logger.error(f"API call failed after {max_retries} attempts: {e}")
-                return None
-            except Exception as e:
-                self.logger.error(f"API call error: {e}")
-                return None
-        self.logger.error(f"API call failed after {max_retries} attempts")
-        return None
 
     # ------------------------------------------------------------------
     # Tool dispatcher
@@ -417,7 +376,7 @@ class AzureOpenAIAdapter(LLMAdapter):
 
     @staticmethod
     def _translate_unix_env_prefix(command: str) -> str:
-        """Translate 'VAR=val VAR2=val2 cmd args...' to 'cmd /c \"set VAR=val && set VAR2=val2 && cmd args...\"'."""
+        """Translate 'VAR=val VAR2=val2 cmd args...' to 'cmd /c "set VAR=val && set VAR2=val2 && cmd args..."'."""
         env_pattern = re.compile(r'^([A-Z_][A-Z0-9_]*)=(\S+)\s+')
         env_vars = []
         remaining = command

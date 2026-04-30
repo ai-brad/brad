@@ -1,55 +1,87 @@
-"""Abstract base class for LLM adapters."""
+"""Abstract base class for LLM providers.
+
+An :class:`LLMProvider` is a thin wrapper over a single model-serving API call
+(Azure OpenAI, OpenAI direct, local vLLM, ...).  It deliberately does *not*
+implement an agentic loop — that is the job of an
+:class:`~brad.adapters.harness.base.AgentHarness`.  Providers are used today
+only by :class:`~brad.adapters.harness.brad_harness.BradHarness`.
+
+Legacy import compatibility: ``LLMAdapter``, ``LLMResult`` and ``LLMUsage`` are
+re-exported from :mod:`brad.adapters.harness.base` with a deprecation warning
+so older callers keep working for one release.
+"""
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+import warnings
+
+# Re-export harness-level types for back-compat.
+from brad.adapters.harness.base import LLMResult, LLMUsage  # noqa: F401
+
+__all__ = ["LLMProvider", "ProviderResponse", "LLMResult", "LLMUsage"]
 
 
 @dataclass
-class LLMUsage:
-    """Token usage statistics from an LLM call."""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    cached_tokens: int = 0
+class ProviderResponse:
+    """Single-call response from an :class:`LLMProvider`.
 
-
-@dataclass
-class LLMResult:
-    """Result from an LLM agent run."""
-    text: str
+    Mirrors the shape of the Azure/OpenAI Responses API just enough for the
+    harness to extract tool calls, text output, token usage and the session
+    identifier (``response_id``) used for warm-starting subsequent turns.
+    """
+    output: List[Dict[str, Any]]            # raw items (function_call / message / ...)
     response_id: Optional[str] = None
     usage: Optional[LLMUsage] = None
+    status: str = "completed"
 
 
-class LLMAdapter(ABC):
-    """
-    Abstract interface for LLM providers (e.g. Azure OpenAI, OpenAI, local models).
+class LLMProvider(ABC):
+    """Abstract interface for LLM providers.
 
-    To add a new LLM adapter:
-    1. Create a new file in brad/adapters/llm/
-    2. Subclass LLMAdapter and implement all abstract methods
-    3. Register it in brad/config.py so it can be selected via configuration
-    See CONTRIBUTING.md for detailed instructions.
+    A provider performs one request/response cycle against a chat/responses API
+    with tool definitions.  It returns the raw output items so the harness can
+    decide what to do next (execute tools, finish, retry).
+
+    To add a new provider:
+    1. Create a new file in ``brad/adapters/llm/``.
+    2. Subclass :class:`LLMProvider` and implement :meth:`call`.
+    3. Register it in :func:`brad.adapters.llm.build_provider`.
     """
 
     @abstractmethod
-    def run(
+    def call(
         self,
-        task_prompt: str,
-        repo_path: str,
-        system_prompt: str = "",
+        input_data: List[Any],
+        tools: List[Dict[str, Any]],
         previous_response_id: Optional[str] = None,
-    ) -> LLMResult:
-        """
-        Run an agentic coding task.
+    ) -> Optional[ProviderResponse]:
+        """Make a single provider call.
 
         Args:
-            task_prompt: The task description / prompt.
-            repo_path: Path to the repository the agent operates on.
-            system_prompt: Optional system/developer prompt (e.g. codebase map).
-            previous_response_id: Optional ID for warm-starting from a prior session.
+            input_data: Chat-style messages or tool outputs to append to the
+                running conversation (as accepted by the underlying API).
+            tools: OpenAI-style function/tool definitions.
+            previous_response_id: Opaque session identifier for warm-starting.
 
         Returns:
-            LLMResult with the agent's final text, response ID, and token usage.
+            :class:`ProviderResponse` on success, ``None`` on unrecoverable
+            failure (the harness will surface this as an ``ERROR:`` message).
         """
         ...
+
+
+def __getattr__(name: str):
+    """Deprecation shim: ``LLMAdapter`` used to live here as the top-level
+    agentic-loop interface.  It has been renamed to
+    :class:`~brad.adapters.harness.base.AgentHarness`.
+    """
+    if name == "LLMAdapter":
+        warnings.warn(
+            "LLMAdapter is deprecated; import AgentHarness from "
+            "brad.adapters.harness instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from brad.adapters.harness.base import AgentHarness
+        return AgentHarness
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

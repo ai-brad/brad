@@ -1,7 +1,7 @@
 """Jira ticketing system adapter."""
 import time
 import requests
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pathlib import Path
 from brad.adapters.ticketing.base import TicketingAdapter
 from brad.logging_config import get_logger
@@ -71,6 +71,20 @@ class JiraAdapter(TicketingAdapter):
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to fetch issues: {e}")
             raise
+
+    def fetch_issue(self, issue_key: str) -> Optional[Dict]:
+        """Fetch a single issue's summary + description. Returns None on failure (never raises)."""
+        try:
+            resp = self._request_with_retry(
+                "get",
+                f"{self.base_url}/rest/api/3/issue/{issue_key}",
+                params={"fields": "summary,description"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            self.logger.warning(f"Could not fetch issue {issue_key}: {e}")
+            return None
 
     # -------------------------
     # Labels

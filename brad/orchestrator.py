@@ -15,7 +15,7 @@ from brad.adapters.ticketing.jira_adapter import JiraAdapter
 from brad.adapters.code_repository.github_adapter import GitHubAdapter
 from brad.adapters.ci_cd.github_actions_adapter import GitHubActionsAdapter
 from brad.adapters.observability.azure_adapter import AzureObservabilityAdapter
-from brad.adapters.llm.azure_openai_adapter import AzureOpenAIAdapter
+from brad.adapters.harness import build_harness
 from brad.agents.interface import AIAgentInterface
 from brad.repo_manager import RepoManager
 from brad.adf_parser import adf_to_text
@@ -58,8 +58,8 @@ class BradOrchestrator:
         self.code_repo = GitHubAdapter(cfg)
         self.ci = GitHubActionsAdapter(cfg)
         self.observability = AzureObservabilityAdapter(cfg)
-        llm = AzureOpenAIAdapter(cfg)
-        self.agent = AIAgentInterface(llm, cfg)
+        harness = build_harness(cfg)
+        self.agent = AIAgentInterface(harness, cfg)
         self.repo = RepoManager(cfg)
 
         # Model identity for cache keys
@@ -242,33 +242,49 @@ class BradOrchestrator:
 
     def _rebase_open_prs(self):
         """Rebase all open Brad PRs that are behind main, skipping those with conflicts."""
-        brad_prs = db.get_open_brad_prs()
+        brad_prs = self.code_repo.get_brad_prs()
         if not brad_prs:
             self.logger.info("No open Brad PRs to rebase")
             return
 
+        # Ensure the workspace is clean before iterating. Leftover edits from a
+        # previous run/agent invocation will otherwise make `git checkout` abort
+        # with "local changes would be overwritten", silently skipping rebases
+        # for every PR after the first dirty one.
+        try:
+            self.repo.reset_to_clean_state("main")
+        except Exception as e:
+            self.logger.warning(f"Could not pre-clean workspace before rebase pass: {e}")
+
         self.logger.info(f"Checking {len(brad_prs)} Brad PRs for rebase")
-        for pr_info in brad_prs:
-            pr_number = pr_info["pr_number"]
-            issue_key = pr_info["issue_key"]
-            
+        for pr in brad_prs:
+            pr_number = pr['number']
+            branch_name = pr.get('head', {}).get('ref', '')
+
             try:
-                pr = self.code_repo.get_pr(pr_number)
-                branch_name = pr.get('head', {}).get('ref', '')
                 if not branch_name:
-                    raise ValueError(f"PR #{pr_number} ({issue_key}) has no branch name")
-                    
+                    raise ValueError(f"PR #{pr_number} has no branch name")
+
+                # Defensive: if a prior iteration left the tree dirty (e.g. a
+                # half-applied rebase the abort didn't fully undo), reset before
+                # trying the next branch so one bad PR can't block the others.
+                if not self.repo.is_clean_working_tree():
+                    self.logger.warning(
+                        f"Workspace dirty before rebasing PR #{pr_number}, resetting to main"
+                    )
+                    self.repo.reset_to_clean_state("main")
+
                 result = self.repo.rebase_branch(branch_name, base_branch="main")
                 if result.get("rebased"):
-                    self.logger.info(f"Rebased PR #{pr_number} ({issue_key})")
+                    self.logger.info(f"Rebased PR #{pr_number} ({branch_name})")
                 elif result.get("up_to_date"):
-                    self.logger.debug(f"PR #{pr_number} ({issue_key}) already up to date")
+                    self.logger.debug(f"PR #{pr_number} ({branch_name}) already up to date")
                 elif result.get("conflict"):
-                    self.logger.warning(f"PR #{pr_number} ({issue_key}) has rebase conflicts, skipping")
+                    self.logger.warning(f"PR #{pr_number} ({branch_name}) has rebase conflicts, skipping")
                 elif result.get("error"):
-                    self.logger.warning(f"PR #{pr_number} ({issue_key}) rebase error: {result['error']}")
+                    self.logger.warning(f"PR #{pr_number} ({branch_name}) rebase error: {result['error']}")
             except Exception as e:
-                self.logger.warning(f"Failed to rebase PR #{pr_number} ({issue_key}): {e}")
+                self.logger.warning(f"Failed to rebase PR #{pr_number} ({branch_name}): {e}")
 
     def _process_review_comments(self):
         """Check all Brad PRs for new review comments (both file-level and PR-level) and process them."""
@@ -363,14 +379,23 @@ class BradOrchestrator:
                 self.code_repo.reply_to_review_comment(pr_number, comment_id, prefixed)
 
         # Push once if verified changes exist
+        pushed = False
         if overall_code_changed:
             try:
                 self.repo.push(branch_name, force=False)
+                pushed = True
             except Exception:
                 try:
                     self.repo.push(branch_name, force=True)
+                    pushed = True
                 except Exception as e:
                     self.logger.error(f"Failed to push changes for PR #{pr_number}: {e}")
+
+        # If we pushed code changes in response to review comments, follow the
+        # PR through CI and auto-fix failures — otherwise brad walks away after
+        # replying and never reacts to a red pipeline.
+        if pushed:
+            self._watch_ci_after_push(pr_number, branch_name)
 
     def _get_pr_diff(self, branch_name: str) -> str:
         """Get the diff of the current branch against main."""
@@ -501,14 +526,140 @@ class BradOrchestrator:
                 self.code_repo.reply_to_issue_comment(pr_number, comment_id, prefixed)
 
         # Push once if verified changes exist
+        pushed = False
         if overall_code_changed:
             try:
                 self.repo.push(branch_name, force=False)
+                pushed = True
             except Exception:
                 try:
                     self.repo.push(branch_name, force=True)
+                    pushed = True
                 except Exception as e:
                     self.logger.error(f"Failed to push changes for PR #{pr_number}: {e}")
+
+        if pushed:
+            self._watch_ci_after_push(pr_number, branch_name)
+
+    def _fetch_issue_goal(self, issue_key: str) -> str:
+        """Best-effort: pull summary + description from Jira as plain text.
+
+        Returns an empty string on any failure — we never want CI follow-up to
+        fall over because Jira is flaky or the branch name doesn't map to a
+        real issue.
+        """
+        try:
+            issue = self.ticketing.fetch_issue(issue_key)
+        except Exception as e:
+            self.logger.warning(f"fetch_issue({issue_key}) raised: {e}")
+            return ""
+        if not issue:
+            return ""
+        fields = issue.get("fields", {}) or {}
+        summary = (fields.get("summary") or "").strip()
+        raw_desc = fields.get("description")
+        try:
+            desc_text = adf_to_text(raw_desc) if raw_desc else ""
+        except Exception as e:
+            self.logger.warning(f"Could not render description for {issue_key}: {e}")
+            desc_text = ""
+        parts = []
+        if summary:
+            parts.append(f"## Original goal: {issue_key}\n{summary}")
+        if desc_text.strip():
+            parts.append(desc_text.strip())
+        return "\n\n".join(parts)
+
+    def _summarize_prior_activity(self, issue_key: str, max_chars: int = 1500) -> str:
+        """Build a short bullet-list digest of prior brad executions/steps for this issue."""
+        try:
+            executions = db.get_executions_by_issue(issue_key)
+        except Exception as e:
+            self.logger.debug(f"Could not fetch executions for {issue_key}: {e}")
+            return ""
+        if not executions:
+            return ""
+
+        lines: List[str] = []
+        # Walk from oldest to newest so the agent reads chronologically.
+        for execution in reversed(executions):
+            exec_id = execution.get("id")
+            started = execution.get("started_at", "")
+            status = execution.get("status", "")
+            lines.append(f"- Execution #{exec_id} [{started}] status={status}")
+            try:
+                steps = db.get_execution_steps(exec_id) if exec_id else []
+            except Exception:
+                steps = []
+            for step in steps:
+                phase = step.get("phase", "?")
+                step_status = step.get("status", "?")
+                summary = (step.get("result_summary") or "").strip().replace("\n", " ")
+                if len(summary) > 200:
+                    summary = summary[:200] + "…"
+                lines.append(f"    • {phase} ({step_status}): {summary}" if summary else f"    • {phase} ({step_status})")
+
+        digest = "\n".join(lines)
+        if len(digest) > max_chars:
+            digest = digest[: max_chars - 1] + "…"
+        return digest
+
+    def _watch_ci_after_push(self, pr_number: int, branch_name: str) -> None:
+        """Watch CI on a PR after a review-driven push and auto-fix failures.
+
+        The review-comments path runs without a Jira-driven `IssueState`/execution,
+        so we synthesize one here and reuse the existing CI monitoring + fix loop
+        (`_handle_ci_monitoring` → `_handle_ci_fix`). Without this, brad replies
+        to comments, pushes a fix, and then walks away even if the new commit
+        breaks the pipeline.
+        """
+        # Brad's branches are named after the Jira issue key, so this is a
+        # sensible default. If the convention ever changes this still works
+        # for traceability — Jira just won't recognize the comment target.
+        issue_key = branch_name
+
+        # Recover the original goal so the CI-fix agent isn't blind to intent.
+        goal_text = self._fetch_issue_goal(issue_key)
+
+        # Surface what brad has already tried on this issue, so retries don't
+        # blindly redo earlier failed strategies.
+        history_text = self._summarize_prior_activity(issue_key)
+
+        description_parts = []
+        if goal_text:
+            description_parts.append(goal_text)
+        if history_text:
+            description_parts.append("## Prior brad activity on this issue\n" + history_text)
+        synthesized_description = "\n\n".join(description_parts)
+
+        try:
+            execution_id = db.create_execution(issue_key, f"Review-driven CI watch on PR #{pr_number}")
+        except Exception as e:
+            self.logger.warning(f"Could not create execution for CI watch on PR #{pr_number}: {e}")
+            execution_id = 0
+
+        state = IssueState(
+            issue_key=issue_key,
+            description=synthesized_description,
+            attachments=[],
+            attachment_paths=[],
+            branch_name=branch_name,
+            execution_id=execution_id,
+            pr_number=pr_number,
+            cost_budget=float(self.cfg.__dict__.get("cost_budget") or 10.0),
+        )
+
+        try:
+            self._handle_ci_monitoring(state)
+            if execution_id:
+                db.finish_execution(execution_id, status="completed", pr_number=pr_number)
+        except Exception as e:
+            self.logger.error(f"CI watch failed for PR #{pr_number}: {e}", exc_info=True)
+            if execution_id:
+                try:
+                    db.finish_execution(execution_id, status="error", error_message=str(e)[:500])
+                except Exception:
+                    pass
 
     def _process_issue(self, issue: Dict):
         """Process a single issue through the Brad workflow."""
@@ -560,16 +711,17 @@ class BradOrchestrator:
                 cost_budget=float(self.cfg.__dict__.get("cost_budget")),
             )
 
-            # Step 4: Close stale PRs from previous executions of the same issue
-            self._set_phase(state, "closing_stale_prs", "Checking for old PRs to close")
-            self._close_stale_prs(state)
-
-            # Step 5: If branch already exists remotely, clean up for fresh start
-            if self.repo.branch_exists_remote(branch_name):
-                try:
-                    self.repo._run_git("push", "origin", "--delete", branch_name, check=False)
-                except Exception as e:
-                    self.logger.warning(f"{issue_key}: Could not delete remote branch: {e}")
+            # Step 4: Detect existing PR — continue on it instead of restarting.
+            # To force a fresh start, close the PR and delete the branch manually before re-labeling.
+            self._set_phase(state, "checking_existing_pr", "Checking for existing PR to continue")
+            existing_pr = self.code_repo.pr_exists_for_branch(branch_name)
+            if existing_pr:
+                self.logger.info(f"{issue_key}: Continuing work on existing PR #{existing_pr}")
+                self.ticketing.comment(
+                    issue_key,
+                    f"Brad is continuing work on existing PR #{existing_pr}. "
+                    f"To restart from scratch, close the PR and delete the `{branch_name}` branch before re-applying the label."
+                )
 
             self._handle_implementation_phase(state)
 
@@ -588,19 +740,6 @@ class BradOrchestrator:
             db.update_execution_phase(execution_id, "error", str(e)[:200])
             db.finish_execution(execution_id, status="error", error_message=str(e)[:500])
             raise
-
-    def _close_stale_prs(self, state: IssueState):
-        """Close any open PRs from previous executions of the same JIRA issue."""
-        try:
-            existing_pr = self.code_repo.pr_exists_for_branch(state.branch_name)
-            if existing_pr:
-                self.logger.info(f"{state.issue_key}: Closing stale PR #{existing_pr} from previous execution")
-                self.code_repo.close_pr(
-                    existing_pr,
-                    f"Superseded by execution #{state.execution_id}. Brad is re-processing {state.issue_key}."
-                )
-        except Exception as e:
-            self.logger.warning(f"{state.issue_key}: Could not close stale PR: {e}")
 
     def _handle_requirements_phase(self, state: IssueState):
         """Handle requirements analysis phase."""

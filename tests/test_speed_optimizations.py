@@ -1,21 +1,19 @@
 """Tests for speed optimizations: batch review, multi_edit tool, pre-search, fail-fast branch."""
-import os
-import re
-import tempfile
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+
+from unittest.mock import Mock, patch
 
 import pytest
 
-from brad.adapters.llm.azure_openai_adapter import AzureOpenAIAdapter
+from brad.adapters.harness import AgentHarness, LLMResult, LLMUsage
+from brad.adapters.harness.brad_harness import BradHarness
 from brad.agents.interface import AIAgentInterface
-from brad.adapters.llm.base import LLMAdapter, LLMResult, LLMUsage
 from test_helpers import make_test_config
 
 
 # -------------------------------------------------------------------------
 # Fixtures
 # -------------------------------------------------------------------------
+
 
 @pytest.fixture
 def temp_git_repo(tmp_path):
@@ -27,12 +25,13 @@ def temp_git_repo(tmp_path):
 @pytest.fixture
 def adapter(temp_git_repo):
     cfg = make_test_config(temp_git_repo)
-    return AzureOpenAIAdapter(cfg)
+    # Tool-implementation tests don't actually invoke the LLM provider; pass a stub.
+    return BradHarness(cfg, provider=Mock())
 
 
 @pytest.fixture
 def mock_llm():
-    return Mock(spec=LLMAdapter)
+    return Mock(spec=AgentHarness)
 
 
 @pytest.fixture
@@ -44,6 +43,7 @@ def agent(mock_llm, temp_git_repo):
 # =========================================================================
 # multi_edit_file tool
 # =========================================================================
+
 
 class TestMultiEditFile:
     def test_applies_multiple_edits(self, adapter, temp_git_repo):
@@ -80,7 +80,7 @@ class TestMultiEditFile:
         assert "Error" in result
 
     def test_tool_is_in_definitions(self):
-        names = [t["name"] for t in AzureOpenAIAdapter.TOOL_DEFINITIONS]
+        names = [t["name"] for t in BradHarness.TOOL_DEFINITIONS]
         assert "multi_edit_file" in names
 
     def test_dispatcher_routes_multi_edit(self, adapter, temp_git_repo):
@@ -98,6 +98,7 @@ class TestMultiEditFile:
 # Batch review comment prompt & parsing
 # =========================================================================
 
+
 class TestBatchReviewComments:
     def _make_comment(self, cid, body="Fix this", path="src/foo.py", line=10):
         return {
@@ -111,7 +112,9 @@ class TestBatchReviewComments:
 
     def test_batch_prompt_contains_all_comment_ids(self, agent):
         comments = [self._make_comment(111), self._make_comment(222)]
-        prompt = agent._build_code_review_reader_batch_prompt(42, "feature-branch", comments)
+        prompt = agent._build_code_review_reader_batch_prompt(
+            42, "feature-branch", comments
+        )
         assert "id=111" in prompt
         assert "id=222" in prompt
         assert "2 code review comments" in prompt
@@ -153,7 +156,7 @@ class TestBatchReviewComments:
                 comments=comments,
                 repo_path=str(temp_git_repo),
             )
-        # LLM was called exactly ONCE for 3 comments
+        # Harness was called exactly ONCE for 3 comments
         assert mock_llm.run.call_count == 1
         assert len(result["comment_results"]) == 3
 
@@ -162,9 +165,10 @@ class TestBatchReviewComments:
 # Pre-search codebase
 # =========================================================================
 
+
 class TestPreSearchCodebase:
     def test_extracts_camel_case_terms(self, agent, temp_git_repo):
-        desc = 'Use ColorTagDefinition to set MessageTagService colors'
+        desc = "Use ColorTagDefinition to set MessageTagService colors"
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=1, stdout="")
             agent._pre_search_codebase(desc, str(temp_git_repo))
@@ -174,7 +178,7 @@ class TestPreSearchCodebase:
             assert "ColorTagDefinition" in combined or "MessageTagService" in combined
 
     def test_extracts_upper_case_constants(self, agent, temp_git_repo):
-        desc = 'Replace RED_COLOR_TAG and ORANGE_COLOR_TAG constants'
+        desc = "Replace RED_COLOR_TAG and ORANGE_COLOR_TAG constants"
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=1, stdout="")
             agent._pre_search_codebase(desc, str(temp_git_repo))
@@ -187,7 +191,7 @@ class TestPreSearchCodebase:
         assert result == ""
 
     def test_formats_results_with_files(self, agent, temp_git_repo):
-        desc = 'Fix the ColorTagDefinition'
+        desc = "Fix the ColorTagDefinition"
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = Mock(
                 returncode=0,
@@ -201,10 +205,10 @@ class TestPreSearchCodebase:
 # Fail-fast on missing branch (orchestrator level)
 # =========================================================================
 
+
 class TestFailFastMissingBranch:
     def test_skips_all_comments_when_branch_missing(self, temp_git_repo):
         from brad.orchestrator import BradOrchestrator
-        from brad import db
 
         cfg = make_test_config(temp_git_repo)
         orch = BradOrchestrator(cfg)
@@ -217,7 +221,9 @@ class TestFailFastMissingBranch:
         orch.repo.repo_path = temp_git_repo
 
         # Branch checkout raises -> should skip
-        orch.repo.checkout_branch.side_effect = RuntimeError("Branch 'X' does not exist")
+        orch.repo.checkout_branch.side_effect = RuntimeError(
+            "Branch 'X' does not exist"
+        )
         orch.code_repo.get_brad_prs.return_value = [
             {"number": 100, "head": {"ref": "X"}}
         ]

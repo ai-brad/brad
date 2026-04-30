@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 
 
 def main():
-    load_dotenv()
+    _dotenv_override = os.environ.get("BRAD_DOTENV_OVERRIDE", "true").lower() != "false"
+    load_dotenv(override=_dotenv_override)
 
     parser = argparse.ArgumentParser(description="Brad Web GUI")
     parser.add_argument("--port", type=int, default=5005, help="Port to run the GUI on (default: 5005)")

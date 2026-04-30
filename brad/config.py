@@ -2,7 +2,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -24,7 +24,7 @@ class Config:
     # Root under which self-bootstrapped target repo clones live
     workspace_dir: str
 
-    # Azure OpenAI configuration (the AI brain)
+    # Azure OpenAI configuration (used by AzureOpenAIProvider)
     azure_openai_endpoint: str   # Full URL including api-version
     azure_openai_api_key: str
     azure_openai_model: str      # e.g. "gpt-4o"
@@ -54,6 +54,27 @@ class Config:
 
     log_level: str = "INFO"
     attachments_dir: str = "attachments"
+
+    # Agent harness selection — which agentic loop drives the model.
+    # See ``brad/adapters/harness`` for available harnesses.
+    harness: str = "brad"  # "brad" or "codex"
+
+    # Inner LLM provider — only consulted when ``harness == "brad"``.
+    # See ``brad/adapters/llm`` for available providers.
+    llm_provider: str = "azure_openai"
+
+    # Codex CLI configuration (used by CodexCliHarness).
+    # ``codex_model`` is intentionally optional: when unset, the CodexCliHarness
+    # omits ``--model`` so codex falls back to whatever is in ~/.codex/config.toml
+    # (model + model_provider + auth). Set CODEX_MODEL only to override.
+    codex_bin: str = "codex"
+    codex_model: Optional[str] = None
+    codex_sandbox: str = "workspace-write"
+    # ``danger`` => --dangerously-bypass-approvals-and-sandbox.  Required because
+    # the implementation prompt asks the agent to push branches and open PRs,
+    # both of which need network + .git writes that --full-auto blocks.
+    codex_approval: str = "danger"
+    codex_timeout: int = 3600
 
 
 def load_config() -> Config:
@@ -110,6 +131,15 @@ def load_config() -> Config:
 
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         attachments_dir=os.environ.get("ATTACHMENTS_DIR", str(Path.cwd() / "attachments")),
+
+        harness=os.environ.get("BRAD_HARNESS", "brad"),
+        llm_provider=os.environ.get("BRAD_LLM_PROVIDER", "azure_openai"),
+
+        codex_bin=os.environ.get("CODEX_BIN", "codex"),
+        codex_model=os.environ.get("CODEX_MODEL") or None,
+        codex_sandbox=os.environ.get("CODEX_SANDBOX", "workspace-write"),
+        codex_approval=os.environ.get("CODEX_APPROVAL", "danger"),
+        codex_timeout=int(os.environ.get("CODEX_TIMEOUT", "3600")),
     )
 
 

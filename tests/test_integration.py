@@ -3,9 +3,7 @@ Integration tests for Brad - focus on real behavior not mocking.
 Tests actual DB operations, phase transitions, cost tracking, etc.
 """
 import tempfile
-import shutil
 import os
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import pytest
@@ -115,10 +113,10 @@ class TestOrchestratorPhaseManagement:
         """Test that phase updates are tracked in DB."""
         cfg = make_test_config(temp_git_repo)
         
-        with patch("brad.orchestrator.AzureOpenAIAdapter") as mock_llm_class:
-            mock_llm = Mock()
-            mock_llm.run.return_value = SimpleNamespace(text="", response_id="1", usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0, cached_tokens=0))
-            mock_llm_class.return_value = mock_llm
+        with patch("brad.orchestrator.build_harness") as mock_build:
+            mock_harness = Mock()
+            mock_harness.run.return_value = SimpleNamespace(text="", response_id="1", usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0, cached_tokens=0))
+            mock_build.return_value = mock_harness
             orchestrator = BradOrchestrator(cfg)
         
         exec_id = db.create_execution("TEST-2", "Test issue")
@@ -188,10 +186,10 @@ class TestRealWorkflows:
         cfg = make_test_config(temp_git_repo)
         cfg.max_review_fix_iterations = 3
         
-        with patch("brad.orchestrator.AzureOpenAIAdapter") as mock_llm_class:
-            mock_llm = Mock()
-            mock_llm.run.return_value = SimpleNamespace(text="", response_id="1", usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0, cached_tokens=0))
-            mock_llm_class.return_value = mock_llm
+        with patch("brad.orchestrator.build_harness") as mock_build:
+            mock_harness = Mock()
+            mock_harness.run.return_value = SimpleNamespace(text="", response_id="1", usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0, cached_tokens=0))
+            mock_build.return_value = mock_harness
             orchestrator = BradOrchestrator(cfg)
         
         # Mock services

@@ -38,7 +38,8 @@ Brad is a **thin orchestration layer** that delegates all engineering decisions 
 | **Code Repository** | `CodeRepositoryAdapter` | GitHub |
 | **CI/CD** | `CICDAdapter` | GitHub Actions |
 | **Observability** | `ObservabilityAdapter` | Azure AKS |
-| **LLM** | `LLMAdapter` | Azure OpenAI Responses API |
+| **Agent harness** | `AgentHarness` | Brad's tool-calling loop, OpenAI Codex CLI |
+| **LLM provider** *(used by `BradHarness`)* | `LLMProvider` | Azure OpenAI Responses API |
 
 ### 📁 Project Structure
 
@@ -56,7 +57,8 @@ brad/                            # Main package
 │   ├── code_repository/         # e.g. GitHub
 │   ├── ci_cd/                   # e.g. GitHub Actions
 │   ├── observability/           # e.g. Azure AKS
-│   └── llm/                     # e.g. Azure OpenAI
+│   ├── harness/                 # Agent harnesses (BradHarness, CodexCliHarness)
+│   └── llm/                     # LLM providers used by BradHarness (Azure OpenAI)
 ├── agents/                      # Prompt building & response parsing
 │   └── interface.py
 └── gui/                         # Flask read-only dashboard
@@ -291,7 +293,11 @@ A: Cost depends on your Azure OpenAI pricing. Typical cost per issue:
 A: No. Brad creates PRs and marks them as ready for review, but a human must merge. This is a safety feature.
 
 **Q: Can I use OpenAI directly instead of Azure?**  
-A: Currently Brad only supports Azure OpenAI. Support for direct OpenAI, Anthropic, and local models is planned.
+A: Two routes:
+1. Set `BRAD_HARNESS=codex` to delegate the entire agentic loop to OpenAI's [Codex CLI](https://github.com/openai/codex) — it brings its own model auth (`codex login` / `OPENAI_API_KEY`).
+2. For Brad's native harness, only Azure OpenAI is wired today; adding an `OpenAIProvider` (or vLLM, etc.) is a small file under `brad/adapters/llm/`.
+
+Anthropic Claude Code is not currently supported.
 
 **Q: What happens if Brad makes a mistake?**  
 A: Brad's changes go through normal PR review. You can request changes, and Brad will attempt to address them. If Brad can't fix the issue, it will mark itself as stuck.

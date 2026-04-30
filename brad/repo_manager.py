@@ -145,7 +145,14 @@ class RepoManager:
         self.logger.info(f"Successfully prepared branch '{branch_name}'")
 
     def checkout_branch(self, branch_name: str, create_if_missing: bool = False):
-        """Checkout an existing branch or optionally create it."""
+        """Checkout an existing branch or optionally create it.
+
+        If the branch exists both locally and on origin, hard-reset the local
+        branch to match origin/<branch_name>. This avoids operating on a stale
+        local tip (e.g. after the remote was rewritten externally or by a
+        previous Brad run), which would otherwise cause force-pushes to wipe
+        out remote work.
+        """
         self.logger.info(f"Checking out branch '{branch_name}'")
 
         existing_branches = self._run_git("branch", check=False).stdout
@@ -153,6 +160,10 @@ class RepoManager:
 
         if branch_exists:
             self._run_git("checkout", "-f", branch_name)
+            if self.branch_exists_remote(branch_name):
+                self._run_git("fetch", "origin", branch_name, check=False)
+                self._run_git("reset", "--hard", f"origin/{branch_name}", check=False)
+                self.logger.info(f"Synced local '{branch_name}' to origin/{branch_name}")
             self.logger.info(f"Checked out existing branch '{branch_name}'")
         elif create_if_missing:
             self._run_git("checkout", "-b", branch_name)

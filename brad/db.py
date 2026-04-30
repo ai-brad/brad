@@ -266,28 +266,6 @@ def get_total_costs() -> Dict:
         return dict(row) if row else {}
 
 
-def get_open_brad_prs() -> List[Dict]:
-    """Get all executions that have a PR number and completed successfully.
-    These PRs may still be open on GitHub and eligible for rebasing."""
-    with _get_conn() as conn:
-        rows = conn.execute(
-            """SELECT id, issue_key, pr_number, pr_url, status, started_at, finished_at
-               FROM executions
-               WHERE pr_number IS NOT NULL
-                 AND status = 'completed'
-               ORDER BY finished_at DESC""",
-        ).fetchall()
-        # Deduplicate by pr_number (keep most recent execution per PR)
-        seen = set()
-        result = []
-        for r in rows:
-            d = dict(r)
-            if d["pr_number"] not in seen:
-                seen.add(d["pr_number"])
-                result.append(d)
-        return result
-
-
 def get_running_execution() -> Optional[Dict]:
     """Get the currently running execution, if any."""
     with _get_conn() as conn:
