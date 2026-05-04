@@ -274,17 +274,318 @@ class BradOrchestrator:
                     )
                     self.repo.reset_to_clean_state("main")
 
-                result = self.repo.rebase_branch(branch_name, base_branch="main")
+                result = self.repo.rebase_branch(
+                    branch_name, base_branch="main", auto_abort_on_conflict=False,
+                )
                 if result.get("rebased"):
                     self.logger.info(f"Rebased PR #{pr_number} ({branch_name})")
+                    # Push happened inside rebase_branch on the no-conflict
+                    # path; treat the post-push CI run the same as any other
+                    # change so test failures auto-route into _handle_ci_fix.
+                    try:
+                        self._watch_ci_after_push(pr_number, branch_name)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"PR #{pr_number}: post-rebase CI watch failed: {e}"
+                        )
                 elif result.get("up_to_date"):
                     self.logger.debug(f"PR #{pr_number} ({branch_name}) already up to date")
                 elif result.get("conflict"):
-                    self.logger.warning(f"PR #{pr_number} ({branch_name}) has rebase conflicts, skipping")
+                    conflicted = result.get("conflicted_files") or []
+                    self.logger.warning(
+                        f"PR #{pr_number} ({branch_name}) has rebase conflicts in "
+                        f"{len(conflicted)} file(s); attempting AI resolution"
+                    )
+                    self._resolve_rebase_conflicts(
+                        pr_number=pr_number,
+                        branch_name=branch_name,
+                        base_branch=result.get("base_branch", "main"),
+                        conflicted_files=conflicted,
+                    )
                 elif result.get("error"):
                     self.logger.warning(f"PR #{pr_number} ({branch_name}) rebase error: {result['error']}")
             except Exception as e:
                 self.logger.warning(f"Failed to rebase PR #{pr_number} ({branch_name}): {e}")
+                # Make sure we don't leave a half-applied rebase behind for
+                # the next PR.
+                try:
+                    self.repo.abort_rebase()
+                except Exception:
+                    pass
+
+    # -------------------------
+    # Rebase conflict resolution
+    # -------------------------
+
+    MAX_CONFLICT_FILES = 20
+    MAX_CONFLICT_ITERATIONS = 5
+
+    def _resolve_rebase_conflicts(
+        self,
+        pr_number: int,
+        branch_name: str,
+        base_branch: str,
+        conflicted_files: list,
+    ) -> None:
+        """Drive AI-only resolution of an in-progress rebase conflict.
+
+        Loops up to ``MAX_CONFLICT_ITERATIONS`` times: gathers context, asks
+        the agent to resolve, verifies markers are gone, runs ``git rebase
+        --continue``. On success, force-pushes (with lease) to the feature
+        branch and hands the PR off to the existing CI fix loop. On failure,
+        aborts the rebase and posts a diagnostic comment on the PR.
+        """
+        from brad import conflict_context as cc
+
+        if len(conflicted_files) > self.MAX_CONFLICT_FILES:
+            self.logger.warning(
+                f"PR #{pr_number}: {len(conflicted_files)} conflicted files exceeds "
+                f"limit of {self.MAX_CONFLICT_FILES}; aborting rebase"
+            )
+            self.repo.abort_rebase()
+            self._comment_on_pr(
+                pr_number,
+                f"Brad attempted to rebase this PR but found {len(conflicted_files)} "
+                f"conflicted files (limit: {self.MAX_CONFLICT_FILES}). Skipping "
+                f"automatic resolution — please rebase manually.",
+            )
+            return
+
+        try:
+            execution_id = db.create_execution(
+                branch_name, f"Rebase conflict resolution for PR #{pr_number}",
+            )
+        except Exception as e:
+            self.logger.warning(f"Could not create execution for conflict resolution: {e}")
+            execution_id = 0
+
+        last_response_id: Optional[str] = None
+        current_files = list(conflicted_files)
+
+        for iteration in range(1, self.MAX_CONFLICT_ITERATIONS + 1):
+            ctx = cc.gather_context(
+                repo=self.repo,
+                branch_name=branch_name,
+                base_branch=base_branch,
+                conflicted_files=current_files,
+                code_repo=self.code_repo,
+                ticketing=self.ticketing,
+                logger=self.logger,
+            )
+            context_section = ctx.to_prompt_section()
+
+            step_id = 0
+            if execution_id:
+                try:
+                    step_id = db.create_step(
+                        execution_id, "conflict_resolution",
+                        f"AI conflict resolution iteration {iteration}",
+                        iteration=iteration,
+                    )
+                except Exception:
+                    pass
+
+            response = self.agent.invoke_conflict_resolution(
+                branch_name=branch_name,
+                base_branch=base_branch,
+                context_section=context_section,
+                repo_path=str(self.repo.repo_path),
+                iteration=iteration,
+                previous_response_id=last_response_id,
+                dev_instructions=self._repo_dev_instructions,
+            )
+            last_response_id = response.get("_response_id")
+
+            usage = response.get("_usage")
+            cost = self._calculate_cost(usage)
+            pt = usage.prompt_tokens if usage else 0
+            ct = usage.completion_tokens if usage else 0
+            if step_id:
+                try:
+                    db.finish_step(
+                        step_id,
+                        status=response.get("action", "unknown"),
+                        prompt_tokens=pt,
+                        completion_tokens=ct,
+                        cost=cost,
+                        result_summary=str(response.get("summary", ""))[:500],
+                    )
+                    db.update_execution_costs(execution_id, pt, ct, cost)
+                except Exception:
+                    pass
+
+            action = response.get("action")
+            if action == "stuck" or action == "error":
+                self.logger.warning(
+                    f"PR #{pr_number}: agent returned {action} on conflict "
+                    f"resolution iteration {iteration}: {response.get('summary','')}"
+                )
+                self.repo.abort_rebase()
+                self._comment_on_pr(
+                    pr_number,
+                    "Brad attempted to auto-resolve rebase conflicts but is stuck:\n\n"
+                    f"```\n{(response.get('summary') or response.get('message',''))[:1500]}\n```\n\n"
+                    "Please rebase manually.",
+                )
+                if execution_id:
+                    try:
+                        db.finish_execution(execution_id, status="error",
+                                            error_message=str(response.get("summary",""))[:500])
+                    except Exception:
+                        pass
+                return
+
+            # Verify the agent did its job before continuing the rebase.
+            still_marked = self._files_still_have_conflict_markers(current_files)
+            if still_marked:
+                self.logger.warning(
+                    f"PR #{pr_number}: agent claimed RESOLVED but conflict markers "
+                    f"remain in: {still_marked}"
+                )
+                self.repo.abort_rebase()
+                self._comment_on_pr(
+                    pr_number,
+                    "Brad attempted to auto-resolve rebase conflicts but the agent "
+                    "left conflict markers in: `"
+                    + ", ".join(still_marked)
+                    + "`. Aborting rebase. Please rebase manually.",
+                )
+                if execution_id:
+                    try:
+                        db.finish_execution(execution_id, status="error",
+                                            error_message="agent left conflict markers")
+                    except Exception:
+                        pass
+                return
+
+            cont = self.repo.continue_rebase()
+            if cont.get("rebased"):
+                self.logger.info(f"PR #{pr_number}: rebase completed after AI resolution")
+                push = self.repo.force_push_with_lease(branch_name)
+                if not push.get("pushed"):
+                    self.logger.warning(
+                        f"PR #{pr_number}: rebase done but force-push failed: "
+                        f"{push.get('error','')}"
+                    )
+                    self._comment_on_pr(
+                        pr_number,
+                        "Brad resolved rebase conflicts locally but failed to push: "
+                        f"`{push.get('error','')[:500]}`. Please push manually.",
+                    )
+                    if execution_id:
+                        try:
+                            db.finish_execution(execution_id, status="error",
+                                                error_message="push failed")
+                        except Exception:
+                            pass
+                    return
+
+                self._comment_on_pr(
+                    pr_number,
+                    "Brad auto-resolved rebase conflicts and force-pushed the rebased "
+                    "branch. Watching CI — any failures will be addressed automatically.",
+                )
+                if execution_id:
+                    try:
+                        db.finish_execution(execution_id, status="completed", pr_number=pr_number)
+                    except Exception:
+                        pass
+                # Hand off to the existing CI-fix loop. Test failures from the
+                # rebase get treated like any other change.
+                try:
+                    self._watch_ci_after_push(pr_number, branch_name)
+                except Exception as e:
+                    self.logger.warning(
+                        f"PR #{pr_number}: post-rebase CI watch failed: {e}"
+                    )
+                return
+
+            if cont.get("conflict"):
+                # New conflicts on the next picked commit — loop with the new
+                # set of files.
+                current_files = cont.get("conflicted_files") or []
+                if not current_files:
+                    self.logger.warning(
+                        f"PR #{pr_number}: continue_rebase reported conflict with "
+                        "no unmerged files; aborting"
+                    )
+                    self.repo.abort_rebase()
+                    return
+                self.logger.info(
+                    f"PR #{pr_number}: more conflicts after --continue, "
+                    f"iterating ({len(current_files)} files)"
+                )
+                continue
+
+            # Anything else (error, in-progress with no work) — bail out.
+            err = cont.get("error", "unknown error continuing rebase")
+            self.logger.warning(f"PR #{pr_number}: continue_rebase failed: {err}")
+            self.repo.abort_rebase()
+            self._comment_on_pr(
+                pr_number,
+                f"Brad failed to continue rebase after resolving conflicts: `{err[:500]}`. "
+                "Aborted. Please rebase manually.",
+            )
+            if execution_id:
+                try:
+                    db.finish_execution(execution_id, status="error", error_message=err[:500])
+                except Exception:
+                    pass
+            return
+
+        # Iteration cap hit
+        self.logger.warning(
+            f"PR #{pr_number}: hit conflict-resolution iteration cap "
+            f"({self.MAX_CONFLICT_ITERATIONS}); aborting rebase"
+        )
+        self.repo.abort_rebase()
+        self._comment_on_pr(
+            pr_number,
+            "Brad hit the conflict-resolution iteration cap "
+            f"({self.MAX_CONFLICT_ITERATIONS}). Aborted rebase. Please rebase manually.",
+        )
+        if execution_id:
+            try:
+                db.finish_execution(execution_id, status="error",
+                                    error_message="iteration cap exceeded")
+            except Exception:
+                pass
+
+    def _files_still_have_conflict_markers(self, paths) -> list:
+        """Return paths that still contain ``<<<<<<<`` / ``=======`` / ``>>>>>>>``."""
+        bad = []
+        for p in paths:
+            content = self.repo.read_conflicted_file(p)
+            if (
+                "<<<<<<<" in content
+                or "=======" in content
+                or ">>>>>>>" in content
+            ):
+                bad.append(p)
+        return bad
+
+    def _comment_on_pr(self, pr_number: int, body: str) -> None:
+        """Best-effort PR comment. Logs and continues on failure."""
+        try:
+            # GitHub adapter exposes reply_to_issue_comment; for fresh comments
+            # we fall back to creating an issue comment via a generic helper if
+            # available. Most adapters provide an `issues/{n}/comments` route;
+            # use it if exposed, else use the existing reply path with id=0
+            # (which most adapters reject), in which case we just log.
+            adapter = self.code_repo
+            if hasattr(adapter, "_request_with_retry") and hasattr(adapter, "base_url"):
+                resp = adapter._request_with_retry(
+                    "post",
+                    f"{adapter.base_url}/issues/{pr_number}/comments",
+                    json={"body": body},
+                )
+                if resp is not None:
+                    resp.raise_for_status()
+                    return
+            # No supported path — log only.
+            self.logger.info(f"(no-op) PR #{pr_number} comment: {body[:200]}")
+        except Exception as e:
+            self.logger.warning(f"Could not post PR #{pr_number} comment: {e}")
 
     def _process_review_comments(self):
         """Check all Brad PRs for new review comments (both file-level and PR-level) and process them."""

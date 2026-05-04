@@ -131,6 +131,37 @@ class AIAgentInterface:
         parsed["_usage"] = result.usage
         return parsed
 
+    def invoke_conflict_resolution(
+        self,
+        branch_name: str,
+        base_branch: str,
+        context_section: str,
+        repo_path: str,
+        iteration: int,
+        previous_response_id: Optional[str] = None,
+        dev_instructions: str = "",
+    ) -> Dict:
+        """Drive AI-only resolution of a rebase conflict.
+
+        Returns ``{"action": "resolved" | "stuck" | "error", "message": ...}``.
+        """
+        self.logger.info(
+            f"Conflict resolution: {branch_name} onto {base_branch} (iteration {iteration})"
+        )
+        prompt = self._build_conflict_resolution_prompt(
+            branch_name, base_branch, context_section, iteration, dev_instructions,
+        )
+        codebase_map = get_codebase_map(repo_path)
+        result = self.harness.run(
+            prompt, repo_path,
+            system_prompt=codebase_map,
+            previous_response_id=previous_response_id,
+        )
+        parsed = self._parse_conflict_resolution_response(result.text)
+        parsed["_response_id"] = result.response_id
+        parsed["_usage"] = result.usage
+        return parsed
+
     def invoke_local_review(
         self,
         issue_key: str,
@@ -429,6 +460,22 @@ class AIAgentInterface:
             dev_instructions_section=dev_instructions_section,
         )
 
+    def _build_conflict_resolution_prompt(
+        self, branch_name, base_branch, context_section, iteration, dev_instructions=""
+    ):
+        dev_instructions_section = (
+            f"\nREPOSITORY DEV INSTRUCTIONS (use these only if you need to look up file conventions; do NOT run tests):\n{dev_instructions}\n"
+            if dev_instructions else ""
+        )
+        template = self._load_prompt("conflict_resolution.txt")
+        return template.format(
+            branch_name=branch_name,
+            base_branch=base_branch,
+            iteration=iteration,
+            context_section=context_section,
+            dev_instructions_section=dev_instructions_section,
+        )
+
     def _build_local_review_prompt(self, issue_key, description, diff, branch_name):
         template = self._load_prompt("local_review.txt")
         return template.format(
@@ -520,6 +567,31 @@ class AIAgentInterface:
             return {"action": "fixed", "message": output}
         self.logger.info("Detected: stuck on review fix")
         return {"action": "stuck", "message": output}
+
+    def _parse_conflict_resolution_response(self, output: str) -> Dict:
+        """Parse the conflict-resolution agent reply.
+
+        The prompt asks for a final line of either ``RESOLVED: ...`` or
+        ``STUCK: ...``. We accept either casing and tolerate trailing
+        whitespace. The orchestrator independently verifies that conflict
+        markers are gone before trusting ``resolved``.
+        """
+        if output.startswith("ERROR:"):
+            return {"action": "error", "message": output}
+        # Match the LAST occurrence — the agent may discuss "RESOLVED" earlier
+        # in its reasoning before producing the final verdict.
+        resolved_iter = list(re.finditer(r"^RESOLVED\s*:\s*(.*)$", output, re.MULTILINE | re.IGNORECASE))
+        stuck_iter = list(re.finditer(r"^STUCK\s*:\s*(.*)$", output, re.MULTILINE | re.IGNORECASE))
+        last_resolved = resolved_iter[-1] if resolved_iter else None
+        last_stuck = stuck_iter[-1] if stuck_iter else None
+        if last_resolved and (not last_stuck or last_resolved.start() > last_stuck.start()):
+            self.logger.info("Conflict resolution: RESOLVED")
+            return {"action": "resolved", "message": output, "summary": last_resolved.group(1).strip()}
+        if last_stuck:
+            self.logger.info("Conflict resolution: STUCK")
+            return {"action": "stuck", "message": output, "summary": last_stuck.group(1).strip()}
+        self.logger.warning("Conflict resolution: no RESOLVED/STUCK verdict, defaulting to stuck")
+        return {"action": "stuck", "message": output, "summary": "no verdict line in agent output"}
 
     def _parse_local_review_fix_response(self, output: str) -> Dict:
         output_lower = output.lower()

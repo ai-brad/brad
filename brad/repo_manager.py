@@ -1,4 +1,5 @@
 """Git repository operations manager."""
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -261,21 +262,34 @@ class RepoManager:
             result = self._run_git("rev-parse", "--short", branch, check=False)
         return result.stdout.strip() or "unknown"
 
-    def rebase_branch(self, branch_name: str, base_branch: str = "main") -> dict:
+    def rebase_branch(
+        self,
+        branch_name: str,
+        base_branch: str = "main",
+        auto_abort_on_conflict: bool = True,
+    ) -> dict:
         """Rebase the given branch onto the latest base branch.
-        
+
         Returns a dict with:
         - 'rebased': True if branch was rebased
         - 'up_to_date': True if already up to date
         - 'conflict': True if rebase conflicts occurred
+        - 'conflicted_files': list of unmerged paths (only when conflict and
+          ``auto_abort_on_conflict=False``; the rebase is left in progress so
+          the caller can resolve and call :meth:`continue_rebase`)
         - 'error': error message if something else went wrong
+
+        When ``auto_abort_on_conflict`` is True (default) the legacy behaviour
+        is preserved: any conflict triggers ``git rebase --abort`` and a clean
+        working tree is left behind. Set it to False to drive AI-based
+        conflict resolution from the orchestrator.
         """
         self.logger.info(f"Attempting to rebase branch '{branch_name}' onto '{base_branch}'")
-        
+
         try:
             # Fetch latest
             self._run_git("fetch", "origin")
-            
+
             # Check if branch exists locally
             existing_branches = self._run_git("branch", check=False).stdout
             if branch_name not in existing_branches:
@@ -284,33 +298,33 @@ class RepoManager:
                 self._run_git("checkout", "-b", branch_name, f"origin/{branch_name}")
             else:
                 self._run_git("checkout", branch_name)
-            
+
             # Get current commit and base commit
             result = self._run_git("rev-parse", "HEAD", check=False)
             current_sha = result.stdout.strip()
-            
+
             result = self._run_git("rev-parse", f"origin/{base_branch}", check=False)
             base_sha = result.stdout.strip()
-            
+
             # Validate commit hashes before proceeding
             if not current_sha or len(current_sha) < 7 or not all(c in '0123456789abcdef' for c in current_sha.lower()):
                 self.logger.error(f"Invalid current SHA: '{current_sha}'")
                 return {"rebased": False, "error": "Invalid current commit hash"}
-            
+
             if not base_sha or len(base_sha) < 7 or not all(c in '0123456789abcdef' for c in base_sha.lower()):
                 self.logger.error(f"Invalid base SHA: '{base_sha}'")
                 return {"rebased": False, "error": "Invalid base commit hash"}
-            
+
             # Check if already up to date by seeing if base is an ancestor
             result = self._run_git("merge-base", "--is-ancestor", f"origin/{base_branch}", "HEAD", check=False)
             if result.returncode == 0:
                 self.logger.info(f"Branch '{branch_name}' is already up to date with {base_branch}")
                 return {"rebased": False, "up_to_date": True}
-            
+
             # Attempt rebase
             self.logger.info(f"Rebasing '{branch_name}' onto 'origin/{base_branch}'")
             result = self._run_git("rebase", f"origin/{base_branch}", check=False)
-            
+
             if result.returncode == 0:
                 self.logger.info(f"Successfully rebased '{branch_name}'")
                 # Push with force since history changed
@@ -323,18 +337,162 @@ class RepoManager:
                 # Check if it's a conflict
                 if "conflict" in result.stdout.lower() or "conflict" in result.stderr.lower():
                     self.logger.warning(f"Rebase conflicts on '{branch_name}'")
-                    self._run_git("rebase", "--abort", check=False)
-                    return {"rebased": False, "conflict": True}
+                    if auto_abort_on_conflict:
+                        self._run_git("rebase", "--abort", check=False)
+                        return {"rebased": False, "conflict": True}
+                    # Leave the rebase in progress; caller will resolve.
+                    conflicted = self.list_unmerged_files()
+                    return {
+                        "rebased": False,
+                        "conflict": True,
+                        "conflicted_files": conflicted,
+                        "base_branch": base_branch,
+                    }
                 else:
                     self.logger.error(f"Rebase failed: {result.stderr}")
                     self._run_git("rebase", "--abort", check=False)
                     return {"rebased": False, "error": result.stderr}
-                    
+
         except Exception as e:
             self.logger.error(f"Failed to rebase branch '{branch_name}': {e}")
             # Try to abort any in-progress rebase
             self._run_git("rebase", "--abort", check=False)
             return {"rebased": False, "error": str(e)}
+
+    # -------------------------
+    # Rebase conflict helpers (used by AI-driven resolution)
+    # -------------------------
+
+    def list_unmerged_files(self) -> list:
+        """Return paths of files currently in an unmerged (conflicted) state."""
+        result = self._run_git(
+            "diff", "--name-only", "--diff-filter=U", check=False
+        )
+        return [line for line in result.stdout.splitlines() if line.strip()]
+
+    def is_rebase_in_progress(self) -> bool:
+        """True if `git rebase` is mid-flight (rebase-merge or rebase-apply dir exists)."""
+        git_dir = self.repo_path / ".git"
+        return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+    def continue_rebase(self) -> dict:
+        """Continue an in-progress rebase after the caller resolved conflicts.
+
+        Stages everything in the working tree first (the AI agent edits files
+        but is told not to run git), then runs ``git rebase --continue``.
+
+        Returns the same shape as :meth:`rebase_branch`.
+        """
+        self.logger.info("Continuing in-progress rebase")
+        # Stage anything the resolver touched. ``git add -A`` is intentional:
+        # the AI may have created/deleted files as part of the resolution.
+        self._run_git("add", "-A", check=False)
+
+        env_extra = {"GIT_EDITOR": "true"}  # auto-accept commit message
+        result = subprocess.run(
+            ["git", "-C", str(self.repo_path), "rebase", "--continue"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, **env_extra},
+        )
+        if result.returncode == 0:
+            if self.is_rebase_in_progress():
+                # Multi-commit rebase that produced no further conflicts on
+                # this step but isn't finished yet. Caller should loop.
+                conflicted = self.list_unmerged_files()
+                if conflicted:
+                    return {"rebased": False, "conflict": True, "conflicted_files": conflicted}
+                # Still in progress with nothing to do — try once more.
+                return {"rebased": False, "conflict": False, "in_progress": True}
+            self.logger.info("Rebase completed")
+            return {"rebased": True}
+
+        combined = (result.stdout or "") + (result.stderr or "")
+        if "conflict" in combined.lower():
+            self.logger.warning("New conflicts surfaced after --continue")
+            return {
+                "rebased": False,
+                "conflict": True,
+                "conflicted_files": self.list_unmerged_files(),
+            }
+        self.logger.error(f"git rebase --continue failed: {combined}")
+        return {"rebased": False, "error": combined.strip()}
+
+    def abort_rebase(self) -> None:
+        """Abort an in-progress rebase. No-op if none."""
+        if self.is_rebase_in_progress():
+            self.logger.info("Aborting in-progress rebase")
+        self._run_git("rebase", "--abort", check=False)
+
+    def force_push_with_lease(self, branch_name: str) -> dict:
+        """Force-push ``branch_name`` to origin with ``--force-with-lease``.
+
+        Never call this for ``main``/protected base branches — the caller is
+        responsible for ensuring ``branch_name`` is a feature branch.
+        """
+        if branch_name in {"main", "master"}:
+            raise ValueError(
+                f"Refusing to force-push protected branch '{branch_name}'"
+            )
+        result = self._run_git(
+            "push", "origin", branch_name, "--force-with-lease", check=False
+        )
+        if result.returncode != 0:
+            self.logger.warning(f"force-with-lease push failed: {result.stderr}")
+            return {"pushed": False, "error": result.stderr.strip()}
+        self.logger.info(f"Force-pushed '{branch_name}' to origin (with lease)")
+        return {"pushed": True}
+
+    def read_conflicted_file(self, path: str) -> str:
+        """Read the working-copy content of a conflicted file (markers included)."""
+        fp = self.repo_path / path
+        if not fp.exists():
+            return ""
+        try:
+            return fp.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            self.logger.warning(f"Could not read conflicted file {path}: {e}")
+            return ""
+
+    def show_stage_blob(self, stage: int, path: str) -> str:
+        """Return the contents of one stage of an unmerged file.
+
+        Stages: 1 = merge base, 2 = ours (HEAD/feature), 3 = theirs (incoming/main).
+        Returns "" if the stage doesn't exist (e.g. add/add conflicts have no stage 1).
+        """
+        if stage not in (1, 2, 3):
+            raise ValueError("stage must be 1, 2, or 3")
+        result = self._run_git("show", f":{stage}:{path}", check=False)
+        if result.returncode != 0:
+            return ""
+        return result.stdout
+
+    def blame_range(self, ref: str, path: str, start_line: int, end_line: int) -> str:
+        """Return ``git blame`` output for a line range at the given ref.
+
+        Best-effort: returns "" on any failure (e.g. file doesn't exist at ref).
+        """
+        if start_line < 1 or end_line < start_line:
+            return ""
+        result = self._run_git(
+            "blame", "-L", f"{start_line},{end_line}", ref, "--", path, check=False
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout
+
+    def log_messages(self, ref_range: str, path: str, max_commits: int = 5) -> str:
+        """Return commit messages touching ``path`` over ``ref_range``.
+
+        Best-effort: returns "" on failure.
+        """
+        result = self._run_git(
+            "log", f"-n{max_commits}", "--format=%H%n%s%n%b%n---", ref_range,
+            "--", path, check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout
 
     def reset_to_clean_state(self, branch: str = "main"):
         """Reset repository to clean state on specified branch."""
