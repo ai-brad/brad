@@ -252,14 +252,18 @@ class CodexCliHarness(AgentHarness):
     def _stream_events(self, proc: subprocess.Popen, usage: LLMUsage) -> None:
         """Consume codex's JSONL stdout, mirroring key events to brad's logger.
 
-        Codex emits one JSON object per line under ``--json``.  The relevant
-        payload types we surface are:
+        Codex emits one JSON object per line under ``--json``.  Two schemas
+        are supported:
 
-        * ``agent_message`` / ``agent_reasoning`` — log a truncated preview.
-        * ``exec_command_begin`` — log the shell command codex is about to run.
-        * ``patch_apply_begin`` — log the files codex is patching.
-        * ``token_count`` — accumulate into the returned :class:`LLMUsage`.
-        * ``error`` — log at error level.
+        * **Current** (codex-cli >= 0.120ish): top-level ``type`` is one of
+          ``thread.started`` / ``turn.started`` / ``turn.completed`` /
+          ``item.started`` / ``item.completed`` / ``error``.  Item events
+          carry an ``item`` object whose own ``type`` is ``agent_message``,
+          ``agent_reasoning``, ``command_execution``, ``file_change``, ...
+          ``turn.completed`` carries a ``usage`` block.
+        * **Legacy**: ``payload.type`` is ``agent_message`` /
+          ``exec_command_begin`` / ``patch_apply_begin`` / ``token_count`` /
+          ``error``.
 
         Any unparseable lines are ignored silently — codex may emit non-JSON
         diagnostics on stdout in some failure modes.
@@ -273,8 +277,83 @@ class CodexCliHarness(AgentHarness):
                 evt = json.loads(line)
             except json.JSONDecodeError:
                 continue
+
+            etype = evt.get("type") or ""
+
+            # ---- Current schema: item.* / turn.* / thread.* / error ------
+            if etype.startswith("item."):
+                item: Dict[str, Any] = evt.get("item") or {}
+                itype = item.get("type") or ""
+                # Only log agent_message on completion to avoid duplicates;
+                # log command/file actions on start so progress is visible
+                # while they run.
+                if itype == "agent_message" and etype == "item.completed":
+                    text = (item.get("text") or "").strip()
+                    if text:
+                        self.logger.info(f"[codex] {text[:500]}")
+                elif itype == "agent_reasoning" and etype == "item.completed":
+                    text = (item.get("text") or "").strip()
+                    if text:
+                        self.logger.info(f"[codex:reasoning] {text[:300]}")
+                elif itype == "command_execution" and etype == "item.started":
+                    cmd = item.get("command") or ""
+                    if isinstance(cmd, list):
+                        cmd = " ".join(str(c) for c in cmd)
+                    self.logger.info(f"[codex:$] {str(cmd)[:300]}")
+                elif itype == "command_execution" and etype == "item.completed":
+                    exit_code = item.get("exit_code")
+                    if exit_code not in (0, None):
+                        tail = (item.get("aggregated_output") or "").strip()[-300:]
+                        self.logger.info(
+                            f"[codex:$ exit={exit_code}] {tail}"
+                        )
+                elif itype == "file_change" and etype == "item.started":
+                    changes = item.get("changes") or item.get("files") or []
+                    if isinstance(changes, list):
+                        names = [
+                            c.get("path") if isinstance(c, dict) else str(c)
+                            for c in changes
+                        ]
+                    elif isinstance(changes, dict):
+                        names = list(changes.keys())
+                    else:
+                        names = [str(changes)]
+                    names = [n for n in names if n]
+                    if names:
+                        self.logger.info(
+                            f"[codex:patch] {', '.join(names[:5])[:300]}"
+                        )
+                continue
+
+            if etype == "turn.completed":
+                u = evt.get("usage") or {}
+                if u:
+                    usage.prompt_tokens = u.get("input_tokens") or usage.prompt_tokens
+                    usage.cached_tokens = (
+                        u.get("cached_input_tokens") or usage.cached_tokens
+                    )
+                    usage.completion_tokens = (
+                        u.get("output_tokens") or usage.completion_tokens
+                    )
+                    usage.total_tokens = (
+                        (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
+                    )
+                continue
+
+            if etype == "thread.started":
+                tid = evt.get("thread_id")
+                if tid:
+                    self.logger.debug(f"[codex] thread {tid}")
+                continue
+
+            if etype == "error":
+                err = evt.get("message") or json.dumps(evt)[:300]
+                self.logger.error(f"[codex:error] {err}")
+                continue
+
+            # ---- Legacy schema fallback ----------------------------------
             payload: Dict[str, Any] = evt.get("payload") or {}
-            ptype = payload.get("type") or evt.get("type") or ""
+            ptype = payload.get("type") or ""
 
             if ptype == "agent_message":
                 msg = (payload.get("message") or "").strip()

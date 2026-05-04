@@ -397,6 +397,34 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.exception(f"Failed to rebase PR #{pr_number}")
             return {"rebased": False, "error": str(e)}
 
+    def get_prs_for_commit(self, commit_sha: str) -> List[Dict]:
+        """Return the list of PRs that contain ``commit_sha``.
+
+        Used by conflict-context gathering to map a blame SHA back to the PR
+        (and from there to the Jira ticket via branch / title). Best-effort:
+        returns ``[]`` on any failure rather than raising — the caller logs
+        and continues.
+        """
+        if not commit_sha:
+            return []
+        try:
+            # The "List pull requests associated with a commit" endpoint is in
+            # preview; the groot media type is required to enable it.
+            headers = dict(self.headers)
+            headers["Accept"] = "application/vnd.github.groot-preview+json"
+            resp = self._request_with_retry(
+                "get",
+                f"{self.base_url}/commits/{commit_sha}/pulls",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json() or []
+        except Exception as e:
+            self.logger.warning(
+                f"Could not fetch PRs for commit {commit_sha[:8]}: {e}"
+            )
+            return []
+
     def update_pr_body(self, pr_number: int, body: str) -> None:
         """Update the body/description of a pull request."""
         self.logger.info(f"Updating body of PR #{pr_number}")
