@@ -626,7 +626,31 @@ class BradOrchestrator:
             review_comments = self.code_repo.get_review_comments_needing_response(pr_number)
             review_level_comments = self.code_repo.get_review_level_comments_needing_response(pr_number)
             issue_comments = self.code_repo.get_issue_comments_needing_response(pr_number)
-            
+
+            # Persistent dedupe: skip anything Brad has already acted on in a
+            # previous cycle. The adapter heuristics above are chat-history
+            # based and have proven fragile (prefix-matching on comment
+            # bodies); this DB layer is authoritative per (pr, kind, id).
+            # Without it, brad re-feeds the same "already addressed" comment
+            # set to the review-fix agent every ci_passed cycle and burns
+            # attempts 1..N against the iteration cap.
+            pre_filter_counts = (
+                len(review_comments), len(review_level_comments), len(issue_comments)
+            )
+            review_comments = db.filter_unprocessed_comments(pr_number, "review", review_comments)
+            review_level_comments = db.filter_unprocessed_comments(pr_number, "review_level", review_level_comments)
+            issue_comments = db.filter_unprocessed_comments(pr_number, "issue", issue_comments)
+            post_filter_counts = (
+                len(review_comments), len(review_level_comments), len(issue_comments)
+            )
+            if pre_filter_counts != post_filter_counts:
+                self.logger.info(
+                    f"PR #{pr_number}: dedupe filtered "
+                    f"review {pre_filter_counts[0]}→{post_filter_counts[0]}, "
+                    f"review_level {pre_filter_counts[1]}→{post_filter_counts[1]}, "
+                    f"issue {pre_filter_counts[2]}→{post_filter_counts[2]}"
+                )
+
             total_comments = len(review_comments) + len(review_level_comments) + len(issue_comments)
             if total_comments == 0:
                 continue
@@ -645,14 +669,17 @@ class BradOrchestrator:
             # Process review comments (file/line-specific)
             if review_comments:
                 self._process_review_comments_batch(pr_number, branch_name, review_comments)
-            
+                db.mark_comments_processed(pr_number, "review", review_comments)
+
             # Process review-level comments (general review body, not tied to lines)
             if review_level_comments:
                 self._process_issue_comments_batch(pr_number, branch_name, review_level_comments)
-            
+                db.mark_comments_processed(pr_number, "review_level", review_level_comments)
+
             # Process issue comments (PR-level general comments)
             if issue_comments:
                 self._process_issue_comments_batch(pr_number, branch_name, issue_comments)
+                db.mark_comments_processed(pr_number, "issue", issue_comments)
 
     def _process_review_comments_batch(self, pr_number: int, branch_name: str, comments: List[Dict]):
         """Process all review comments for a PR in a single LLM call."""
@@ -1424,6 +1451,19 @@ class BradOrchestrator:
                 elif not user_login.endswith("[bot]") and user_type != "Bot":
                     review_comments.append(c)
 
+            # Persistent dedupe: drop anything Brad has already addressed in a
+            # previous cycle. Without this the agent runs against the same
+            # "already addressed" set on every ci_passed, incrementing
+            # state.review_fix_count up to max_review_fix_iterations on a
+            # no-op (observed today: attempts 1→4 on PR #2363 in 4 minutes).
+            pre = len(review_comments)
+            review_comments = db.filter_unprocessed_comments(pr_number, "review", review_comments)
+            if pre != len(review_comments):
+                self.logger.info(
+                    f"PR #{pr_number}: dedupe filtered ci-passed review comments "
+                    f"{pre}→{len(review_comments)}"
+                )
+
             if review_comments:
                 self._set_phase(state, "addressing_review_comments", f"{len(review_comments)} review comments to address")
                 self.ticketing.comment(
@@ -1431,6 +1471,10 @@ class BradOrchestrator:
                     f"CI passed, but there are {len(review_comments)} review comments to address. Brad is working on them..."
                 )
                 self._handle_review_fix(state, review_comments)
+                # Mark processed even if the agent said "already done" — that
+                # is precisely the case we must not re-enter. New review
+                # comments posted after this point will have fresh IDs.
+                db.mark_comments_processed(pr_number, "review", review_comments)
             else:
                 self._set_phase(state, "done", "All CI checks passed, no review comments")
                 try:

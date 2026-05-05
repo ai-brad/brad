@@ -56,9 +56,13 @@ Brad exclusively uses existing engineering tools:
 
 - GitHub Actions (CI/CD)
 
-- Azure OpenAI Responses API (AI coding agent with tool-calling)
+- Azure OpenAI Responses API (AI coding agent with tool-calling), OR
 
-No custom UIs are required.
+- OpenAI Codex CLI (delegated agentic loop, selected via `BRAD_HARNESS=codex`)
+
+The harness is pluggable (`brad/adapters/harness/`); adding other backends (e.g. Anthropic, local models) is a small adapter.
+
+No custom UIs are required; a read-only Flask dashboard (`brad_gui.py`) is provided for observability.
 
 ## 4. Operating Model Overview
 
@@ -490,13 +494,13 @@ Brad is:
 
     - Python 3.12
 
-    - FastAPI
+    - Your target repo's stack (language, framework, test runner — whatever it is)
 
-    - LangChain / LangGraph
-
-    - PMS connectors
+    - PMS connectors (Jira, GitHub)
 
     - Your testing taxonomy (unit / integration / AI /
         E2E)
 
     - Your repo patterns, quirks, and gotchas
+
+Brad itself is implemented in plain Python 3.12 with Flask for the dashboard and the Azure OpenAI Responses API (or Codex CLI) for the agent loop. It does not require FastAPI or LangChain/LangGraph; earlier drafts of this spec listed those as candidate dependencies but the shipped implementation uses neither.

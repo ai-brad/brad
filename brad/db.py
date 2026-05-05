@@ -296,6 +296,90 @@ def pr_belongs_to_brad(pr_number: int) -> bool:
 
 
 # -------------------------
+# Processed PR comments (dedupe)
+# -------------------------
+
+# Kinds supported by pr_processed_comments. Kept as a module constant so
+# callers can't accidentally introduce typos that would silently bypass
+# dedupe.
+PROCESSED_COMMENT_KINDS = ("review", "review_level", "issue")
+
+
+def get_processed_comment_ids(pr_number: int, kind: str) -> set:
+    """Return the set of comment IDs already processed for (pr_number, kind).
+
+    Used by the review/issue comment paths to skip anything Brad has already
+    acted on. Unknown kinds return an empty set (fail-open) so a caller bug
+    degrades to "old behaviour" rather than "silent skip everything".
+    """
+    if kind not in PROCESSED_COMMENT_KINDS:
+        logger.warning(f"get_processed_comment_ids: unknown kind '{kind}'")
+        return set()
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT comment_id FROM pr_processed_comments "
+            "WHERE pr_number = ? AND kind = ?",
+            (pr_number, kind),
+        ).fetchall()
+        return {row["comment_id"] for row in rows}
+
+
+def mark_comments_processed(
+    pr_number: int,
+    kind: str,
+    comments: List[Dict],
+    skip_reason: Optional[str] = None,
+) -> int:
+    """Mark a batch of comments as processed.
+
+    ``comments`` is a list of GitHub-shaped dicts (must contain 'id';
+    optionally 'user.login' for observability). Returns the number of rows
+    actually inserted. Existing (pr, kind, id) rows are left untouched so
+    we never overwrite an earlier skip_reason with a later one.
+    """
+    if kind not in PROCESSED_COMMENT_KINDS:
+        raise ValueError(f"mark_comments_processed: unknown kind '{kind}'")
+    if not comments:
+        return 0
+    now = _now()
+    rows = []
+    for c in comments:
+        cid = c.get("id")
+        if cid is None:
+            continue
+        author = (c.get("user") or {}).get("login") if isinstance(c.get("user"), dict) else None
+        rows.append((pr_number, kind, int(cid), author, now, skip_reason))
+    if not rows:
+        return 0
+    with _get_conn() as conn:
+        cursor = conn.executemany(
+            "INSERT OR IGNORE INTO pr_processed_comments "
+            "(pr_number, kind, comment_id, author, processed_at, skip_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        return cursor.rowcount or 0
+
+
+def filter_unprocessed_comments(
+    pr_number: int,
+    kind: str,
+    comments: List[Dict],
+) -> List[Dict]:
+    """Return only the comments not yet in pr_processed_comments.
+
+    Preserves input order. This is the single chokepoint the orchestrator
+    calls right after fetching "needing response" lists.
+    """
+    if not comments:
+        return comments
+    known = get_processed_comment_ids(pr_number, kind)
+    if not known:
+        return comments
+    return [c for c in comments if c.get("id") not in known]
+
+
+# -------------------------
 # Model costs (with TTL)
 # -------------------------
 

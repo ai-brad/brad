@@ -1,7 +1,7 @@
 # Brad - Autonomous AI Software Engineer
 
-[![Tests](https://img.shields.io/badge/tests-126%20passing-brightgreen)](https://github.com/yourusername/brad/actions)
-[![Coverage](https://img.shields.io/badge/coverage-45%25-yellow)](https://github.com/yourusername/brad)
+[![Tests](https://img.shields.io/badge/tests-126%20passing-brightgreen)](https://github.com/ai-brad/brad/actions)
+[![Coverage](https://img.shields.io/badge/coverage-45%25-yellow)](https://github.com/ai-brad/brad)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 
@@ -11,7 +11,7 @@ Brad is an autonomous AI software engineer that takes JIRA issues labeled with `
 
 ## 🎥 Demo
 
-**Watch Brad in action:** [Video Demo](https://github.com/yourusername/brad/raw/main/docs/brad.mp4)
+**Watch Brad in action:** [Video Demo](https://github.com/ai-brad/brad/raw/main/docs/brad.mp4)
 
 ![Brad Dashboard](https://via.placeholder.com/800x400?text=Brad+Dashboard+Screenshot)
 
@@ -95,7 +95,7 @@ irm https://astral.sh/uv/install.ps1 | iex
 ### Step 2: Clone and Install
 
 ```bash
-git clone https://github.com/yourusername/brad.git
+git clone https://github.com/ai-brad/brad.git
 cd brad
 uv sync
 ```
@@ -329,6 +329,6 @@ Brad is built on:
 ## 📞 Support
 
 - 📖 [Documentation](README.md)
-- 🐛 [Issue Tracker](https://github.com/yourusername/brad/issues)
-- 💬 [Discussions](https://github.com/yourusername/brad/discussions)
+- 🐛 [Issue Tracker](https://github.com/ai-brad/brad/issues)
+- 💬 [Discussions](https://github.com/ai-brad/brad/discussions)
 - 📧 Email: support@brad-project.dev (coming soon)

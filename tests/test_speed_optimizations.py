@@ -209,8 +209,12 @@ class TestPreSearchCodebase:
 class TestFailFastMissingBranch:
     def test_skips_all_comments_when_branch_missing(self, temp_git_repo):
         from brad.orchestrator import BradOrchestrator
+        from brad import db
 
         cfg = make_test_config(temp_git_repo)
+        # Orchestrator does not init the DB; tests that exercise paths which
+        # now touch pr_processed_comments must do so explicitly.
+        db.init_db(cfg.db_path)
         orch = BradOrchestrator(cfg)
         orch.ticketing = Mock()
         orch.code_repo = Mock()
