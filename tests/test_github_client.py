@@ -1,7 +1,6 @@
 import pytest
 from unittest.mock import Mock, patch
 from brad.adapters.code_repository.github_adapter import GitHubAdapter
-from brad.config import Config
 from test_helpers import make_test_config
 
 
@@ -30,20 +29,21 @@ def test_open_pr_success(github_client):
     mock_response.json.return_value = {
         "number": 123,
         "html_url": "https://github.com/owner/repo/pull/123",
-        "title": "Test PR"
+        "title": "Test PR",
     }
     mock_response.raise_for_status = Mock()
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.post", return_value=mock_response) as mock_post:
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.post",
+        return_value=mock_response,
+    ) as mock_post:
         pr = github_client.open_pr(
-            branch="feature-branch",
-            title="Test PR",
-            body="Test body"
+            branch="feature-branch", title="Test PR", body="Test body"
         )
-        
+
         assert pr["number"] == 123
         assert pr["html_url"] == "https://github.com/owner/repo/pull/123"
-        
+
         # Verify API call
         call_args = mock_post.call_args
         payload = call_args.kwargs["json"]
@@ -55,17 +55,20 @@ def test_open_pr_success(github_client):
 def test_open_pr_custom_base(github_client):
     """Test opening a PR with custom base branch."""
     mock_response = Mock()
-    mock_response.json.return_value = {"number": 123, "html_url": "https://github.com/owner/repo/pull/123"}
+    mock_response.json.return_value = {
+        "number": 123,
+        "html_url": "https://github.com/owner/repo/pull/123",
+    }
     mock_response.raise_for_status = Mock()
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.post", return_value=mock_response) as mock_post:
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.post",
+        return_value=mock_response,
+    ) as mock_post:
         github_client.open_pr(
-            branch="feature",
-            title="Test",
-            body="Body",
-            base="develop"
+            branch="feature", title="Test", body="Body", base="develop"
         )
-        
+
         payload = mock_post.call_args.kwargs["json"]
         assert payload["base"] == "develop"
 
@@ -74,8 +77,11 @@ def test_open_pr_failure(github_client):
     """Test handling PR creation failure."""
     mock_response = Mock()
     mock_response.raise_for_status.side_effect = Exception("API Error")
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.post", return_value=mock_response):
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.post",
+        return_value=mock_response,
+    ):
         with pytest.raises(Exception):
             github_client.open_pr("branch", "title", "body")
 
@@ -86,13 +92,16 @@ def test_get_pr_success(github_client):
     mock_response.json.return_value = {
         "number": 123,
         "title": "Test PR",
-        "state": "open"
+        "state": "open",
     }
     mock_response.raise_for_status = Mock()
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.get", return_value=mock_response):
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.get",
+        return_value=mock_response,
+    ):
         pr = github_client.get_pr(123)
-        
+
         assert pr["number"] == 123
         assert pr["state"] == "open"
 
@@ -104,10 +113,13 @@ def test_pr_exists_for_branch_true(github_client):
         {"number": 123, "head": {"ref": "feature-branch"}}
     ]
     mock_response.raise_for_status = Mock()
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.get", return_value=mock_response):
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.get",
+        return_value=mock_response,
+    ):
         pr_number = github_client.pr_exists_for_branch("feature-branch")
-        
+
         assert pr_number == 123
 
 
@@ -116,10 +128,13 @@ def test_pr_exists_for_branch_false(github_client):
     mock_response = Mock()
     mock_response.json.return_value = []
     mock_response.raise_for_status = Mock()
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.get", return_value=mock_response):
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.get",
+        return_value=mock_response,
+    ):
         pr_number = github_client.pr_exists_for_branch("feature-branch")
-        
+
         assert pr_number is None
 
 
@@ -127,10 +142,13 @@ def test_pr_exists_for_branch_error(github_client):
     """Test checking for existing PR when API fails."""
     mock_response = Mock()
     mock_response.raise_for_status.side_effect = Exception("API Error")
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.get", return_value=mock_response):
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.get",
+        return_value=mock_response,
+    ):
         pr_number = github_client.pr_exists_for_branch("feature-branch")
-        
+
         # Should return None on error, not raise
         assert pr_number is None
 
@@ -140,12 +158,80 @@ def test_fetch_review_comments(github_client):
     mock_response = Mock()
     mock_response.json.return_value = [
         {"id": 1, "body": "Please fix this"},
-        {"id": 2, "body": "Looks good"}
+        {"id": 2, "body": "Looks good"},
     ]
     mock_response.raise_for_status = Mock()
-    
-    with patch("brad.adapters.code_repository.github_adapter.requests.get", return_value=mock_response):
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.get",
+        return_value=mock_response,
+    ):
         comments = github_client.fetch_review_comments(123)
-        
+
         assert len(comments) == 2
         assert comments[0]["body"] == "Please fix this"
+
+
+def test_get_issue_comments_skips_human_comment_after_brad_rebase_notice(github_client):
+    """Regression: a Brad-authored rebase notice ('Brad auto-resolved...') sitting
+    immediately after a human comment must be recognised as a Brad response and
+    NOT cause the human comment to be re-flagged forever (caused 100+ reply
+    loops on flaerobotics/bea PR #2355)."""
+    issue_comments = [
+        # Original human comment
+        {
+            "id": 1,
+            "body": "Tested on dev2 and it works",
+            "user": {"login": "human-user"},
+            "created_at": "2026-04-29T19:10:31Z",
+        },
+        # Brad-authored notice that does NOT start with 'Brad reaction:' or 'Brad checking'
+        {
+            "id": 2,
+            "body": "Brad auto-resolved rebase conflicts and force-pushed the rebased branch.",
+            "user": {"login": "brad-bot"},
+            "created_at": "2026-05-04T08:24:09Z",
+        },
+        # Brad already responded substantively as well
+        {
+            "id": 3,
+            "body": "Brad reaction: Acknowledged dev2 verification.",
+            "user": {"login": "brad-bot"},
+            "created_at": "2026-05-04T10:30:00Z",
+        },
+    ]
+
+    with patch.object(
+        github_client, "fetch_issue_comments", return_value=issue_comments
+    ):
+        needs_response = github_client.get_issue_comments_needing_response(2355)
+
+    assert needs_response == [], (
+        "Human comment must be deduped when ANY Brad-authored ('Brad ...') "
+        "comment follows it; otherwise Brad re-replies in an infinite loop."
+    )
+
+
+def test_get_issue_comments_flags_truly_unanswered_comment(github_client):
+    """A human comment with no following Brad reply still gets flagged."""
+    issue_comments = [
+        {
+            "id": 1,
+            "body": "Brad reaction: previously addressed.",
+            "user": {"login": "brad-bot"},
+            "created_at": "2026-05-01T00:00:00Z",
+        },
+        {
+            "id": 2,
+            "body": "Please also handle the empty list case",
+            "user": {"login": "human-user"},
+            "created_at": "2026-05-02T00:00:00Z",
+        },
+    ]
+
+    with patch.object(
+        github_client, "fetch_issue_comments", return_value=issue_comments
+    ):
+        needs_response = github_client.get_issue_comments_needing_response(2355)
+
+    assert [c["id"] for c in needs_response] == [2]
