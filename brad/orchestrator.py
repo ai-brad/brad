@@ -265,6 +265,28 @@ class BradOrchestrator:
                 if not branch_name:
                     raise ValueError(f"PR #{pr_number} has no branch name")
 
+                # Re-check PR state right before rebasing. The brad_prs list is
+                # a snapshot from the start of the rebase pass, but a long
+                # rebase loop (especially with AI conflict resolution) can take
+                # many minutes during which an earlier PR may get merged or
+                # closed. Without this guard, brad happily rebases a merged
+                # branch against the new main (which now contains the merged
+                # work), producing huge spurious conflicts and burning tokens.
+                try:
+                    fresh = self.code_repo.get_pr(pr_number)
+                    if fresh.get("state") != "open" or fresh.get("merged_at"):
+                        self.logger.info(
+                            f"PR #{pr_number} ({branch_name}) is no longer open "
+                            f"(state={fresh.get('state')}, merged_at={fresh.get('merged_at')}); "
+                            f"skipping rebase"
+                        )
+                        continue
+                except Exception as e:
+                    self.logger.warning(
+                        f"PR #{pr_number}: could not refresh state before rebase: {e}; "
+                        f"proceeding with stale snapshot"
+                    )
+
                 # Defensive: if a prior iteration left the tree dirty (e.g. a
                 # half-applied rebase the abort didn't fully undo), reset before
                 # trying the next branch so one bad PR can't block the others.

@@ -241,3 +241,65 @@ class TestFailFastMissingBranch:
         orch.agent.invoke_code_review_reader.assert_not_called()
         # No "Brad checking" replies either
         orch.code_repo.reply_to_review_comment.assert_not_called()
+
+
+# =========================================================================
+# Skip rebase on PRs that got merged/closed mid-cycle
+# =========================================================================
+
+
+class TestRebaseSkipsMergedPRs:
+    def _make_orch(self, temp_git_repo):
+        from brad.orchestrator import BradOrchestrator
+
+        cfg = make_test_config(temp_git_repo)
+        orch = BradOrchestrator(cfg)
+        orch.ticketing = Mock()
+        orch.code_repo = Mock()
+        orch.ci = Mock()
+        orch.observability = Mock()
+        orch.agent = Mock()
+        orch.repo = Mock()
+        orch.repo.repo_path = temp_git_repo
+        orch.repo.is_clean_working_tree.return_value = True
+        return orch
+
+    def test_skips_pr_merged_between_snapshot_and_rebase(self, temp_git_repo):
+        """Regression: brad_prs is a snapshot taken at start of the rebase pass.
+        If a PR gets merged mid-pass (because the loop took several minutes on
+        an earlier PR's AI conflict resolution), brad must not rebase the
+        merged branch — it would force-push a stale tree on top of itself."""
+        orch = self._make_orch(temp_git_repo)
+        orch.code_repo.get_brad_prs.return_value = [
+            {"number": 2355, "head": {"ref": "DEV-3205"}},
+            {"number": 2363, "head": {"ref": "DEV-3517"}},
+        ]
+        # PR 2355 was merged mid-cycle; PR 2363 is still open.
+        orch.code_repo.get_pr.side_effect = lambda n: (
+            {"state": "closed", "merged_at": "2026-05-05T07:36:19Z"}
+            if n == 2355
+            else {"state": "open", "merged_at": None}
+        )
+        orch.repo.rebase_branch.return_value = {"up_to_date": True}
+
+        orch._rebase_open_prs()
+
+        # Only the still-open PR should reach rebase_branch.
+        rebased_branches = [
+            call.args[0] for call in orch.repo.rebase_branch.call_args_list
+        ]
+        assert rebased_branches == ["DEV-3517"]
+
+    def test_proceeds_with_stale_snapshot_when_refresh_fails(self, temp_git_repo):
+        """If the PR-state refresh API call fails, brad falls back to the
+        snapshot rather than skipping every rebase."""
+        orch = self._make_orch(temp_git_repo)
+        orch.code_repo.get_brad_prs.return_value = [
+            {"number": 42, "head": {"ref": "DEV-1"}},
+        ]
+        orch.code_repo.get_pr.side_effect = RuntimeError("transient 5xx")
+        orch.repo.rebase_branch.return_value = {"up_to_date": True}
+
+        orch._rebase_open_prs()
+
+        orch.repo.rebase_branch.assert_called_once()
