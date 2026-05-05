@@ -166,7 +166,13 @@ class GitHubAdapter(CodeRepositoryAdapter):
             all_comments = self.fetch_review_comments(pr_number)
             self.logger.info(f"PR #{pr_number}: Found {len(all_comments)} total review comments")
 
-            _BRAD_PREFIXES = ('Brad reaction: ', 'Brad checking')
+            # Match every Brad-authored PR comment. All Brad messages start
+            # with 'Brad ' (e.g. 'Brad reaction: ...', 'Brad checking...',
+            # 'Brad auto-resolved rebase conflicts...', 'Brad attempted to ...').
+            # Using only the narrower prefixes caused infinite-response loops
+            # when a non-prefixed Brad message (like the rebase notice) sat
+            # immediately after a human comment.
+            _BRAD_PREFIXES = ('Brad ',)
             _CHECKING_MESSAGE = 'Brad reaction: checking...'
 
             # Check PR ownership and ongoing work status
@@ -531,7 +537,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             all_comments = self.fetch_issue_comments(pr_number)
             self.logger.info(f"PR #{pr_number}: Found {len(all_comments)} total issue comments")
 
-            _BRAD_PREFIXES = ('Brad reaction: ', 'Brad checking')
+            _BRAD_PREFIXES = ('Brad ',)
             _BOT_SUFFIXES = ('[bot]',)
             
             needs_response = []
@@ -623,7 +629,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             all_reviews = resp.json()
             self.logger.info(f"PR #{pr_number}: Found {len(all_reviews)} total reviews")
 
-            _BRAD_PREFIXES = ('Brad reaction: ', 'Brad checking')
+            _BRAD_PREFIXES = ('Brad ',)
             _BOT_SUFFIXES = ('[bot]',)
 
             needs_response = []
