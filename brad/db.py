@@ -387,12 +387,14 @@ _DEFAULT_MODEL_COSTS = [
     ("gpt-4o",          0.0025,  0.0100, "default"),
     ("gpt-4o-mini",     0.00015, 0.0006, "default"),
     ("gpt-4.1",         0.002,   0.008,  "default"),
-    ("gpt-4.1-mini",    0.0004,  0.0016, "default"),
-    ("gpt-4.1-nano",    0.0001,  0.0004, "default"),
+    ("gpt-4.1-mini",    0.0004, 0.0016, "default"),
+    ("gpt-4.1-nano",    0.0001, 0.0004, "default"),
     ("o3",              0.002,   0.008,  "default"),
-    ("o3-mini",         0.0011,  0.0044, "default"),
-    ("o4-mini",         0.0011,  0.0044, "default"),
+    ("o3-mini",         0.0011, 0.0044, "default"),
+    ("o4-mini",         0.0011, 0.0044, "default"),
     ("gpt-5.2-codex",   0.003,   0.012,  "default"),
+    ("gpt-5-codex",     0.00125, 0.0100, "default"),
+    ("gpt-5.4",         0.005,   0.020,  "default"),
 ]
 
 _COST_TTL_HOURS = 24

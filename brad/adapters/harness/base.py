@@ -40,6 +40,11 @@ class AgentHarness(ABC):
     3. Register it in :func:`brad.adapters.harness.build_harness`.
     """
 
+    @property
+    def model_name(self) -> str:
+        """Return the model name used by this harness for cost calculation."""
+        raise NotImplementedError("Subclasses must implement model_name")
+
     @abstractmethod
     def run(
         self,
