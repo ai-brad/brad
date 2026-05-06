@@ -164,7 +164,7 @@ class BradOrchestrator:
         Cached prompt tokens are charged at 50% of normal prompt rate."""
         if not usage:
             return 0.0
-        costs = db.get_model_cost(self.cfg.azure_openai_model)
+        costs = db.get_model_cost(self.agent.harness.model_name)
         cached = getattr(usage, "cached_tokens", 0) or 0
         non_cached_prompt = max(0, usage.prompt_tokens - cached)
         prompt_cost = (non_cached_prompt / 1000.0) * costs["prompt"]

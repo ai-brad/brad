@@ -164,6 +164,11 @@ class BradHarness(AgentHarness):
         self.max_iterations = 200
         self.logger.info(f"BradHarness initialized: provider={type(provider).__name__}")
 
+    @property
+    def model_name(self) -> str:
+        """Return the model name used by BradHarness for cost calculation."""
+        return getattr(self.cfg, 'azure_openai_model', 'gpt-4o')
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------

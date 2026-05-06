@@ -81,6 +81,11 @@ class CodexCliHarness(AgentHarness):
             f"sandbox={self.sandbox} approval={self.approval}"
         )
 
+    @property
+    def model_name(self) -> str:
+        """Return the model name used by Codex for cost calculation."""
+        return self.model or "gpt-5-codex"
+
     def run(
         self,
         task_prompt: str,
