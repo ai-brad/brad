@@ -12,12 +12,16 @@ class RepoManager:
         self.repo_path = Path(cfg.target_repo_path)
         self.github_repo = getattr(cfg, "github_repo", "")
         self.github_token = getattr(cfg, "github_token", "")
+        self.provision_hook = getattr(cfg, "target_repo_provision_hook", None)
         self.logger.info(f"Initialized repo manager for {self.repo_path}")
 
-        self._bootstrap_clone()
+        cloned = self._bootstrap_clone()
 
         if not (self.repo_path / ".git").exists():
             raise ValueError(f"Not a git repository: {self.repo_path}")
+
+        if cloned:
+            self._run_provision_hook()
 
         self._ensure_tokenized_origin()
         self._ensure_git_identity()
@@ -30,15 +34,18 @@ class RepoManager:
             return None
         return f"https://x-access-token:{self.github_token}@github.com/{self.github_repo}.git"
 
-    def _bootstrap_clone(self) -> None:
-        """If the target path is missing, clone github_repo into it via HTTPS+token."""
+    def _bootstrap_clone(self) -> bool:
+        """If the target path is missing, clone github_repo into it via HTTPS+token.
+
+        Returns True if a fresh clone was performed, False if the repo already existed.
+        """
         if self.repo_path.exists() and (self.repo_path / ".git").exists():
-            return
+            return False
 
         url = self._tokenized_origin_url()
         if url is None:
             # No way to self-bootstrap; leave the existing error paths to complain.
-            return
+            return False
 
         if self.repo_path.exists() and any(self.repo_path.iterdir()):
             raise ValueError(
@@ -58,6 +65,49 @@ class RepoManager:
             raise RuntimeError(
                 f"Failed to clone {self.github_repo} into {self.repo_path}: {safe_err.strip()}"
             )
+        return True
+
+    def _run_provision_hook(self) -> None:
+        """Run the operator-supplied provision hook after a fresh clone.
+
+        The hook receives the absolute clone path as $1 and is expected to
+        provision the target repo's .env file and any other prerequisites
+        (e.g. starting companion services).  Failures are logged but do not
+        abort startup — the operator should ensure the hook is idempotent and
+        exits non-zero only for genuine errors.
+        """
+        if not self.provision_hook:
+            return
+
+        hook_path = Path(self.provision_hook)
+        if not hook_path.exists():
+            self.logger.error(
+                f"TARGET_REPO_PROVISION_HOOK is set but the script does not exist: {hook_path}"
+            )
+            return
+        if not os.access(hook_path, os.X_OK):
+            self.logger.error(
+                f"TARGET_REPO_PROVISION_HOOK script is not executable: {hook_path}"
+            )
+            return
+
+        self.logger.info(f"Running provision hook: {hook_path} {self.repo_path}")
+        result = subprocess.run(
+            [str(hook_path), str(self.repo_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip():
+            self.logger.info(f"Provision hook stdout:\n{result.stdout.strip()}")
+        if result.stderr.strip():
+            self.logger.warning(f"Provision hook stderr:\n{result.stderr.strip()}")
+        if result.returncode != 0:
+            self.logger.error(
+                f"Provision hook exited with code {result.returncode}. "
+                "The target repo may be missing its .env — check the hook script."
+            )
+        else:
+            self.logger.info("Provision hook completed successfully.")
 
     def _ensure_tokenized_origin(self) -> None:
         """Keep origin pointed at the tokenized HTTPS URL if we have a token.

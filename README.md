@@ -128,6 +128,30 @@ cp .env.example .env
 
 See `.env.example` for detailed instructions on each setting.
 
+### Provisioning the target repo's environment
+
+The target repo (the one Brad writes code in) almost certainly has its own `.env` file — database credentials, API keys, feature flags — that is not version-controlled. Brad clones that repo automatically, but it has no way to know where those secrets live on your server. You must tell it via a **provision hook**.
+
+Set `TARGET_REPO_PROVISION_HOOK` in Brad's `.env` to the path of an executable shell script. Brad runs it once immediately after cloning the target repo, passing the clone path as `$1`:
+
+```bash
+# ~/.brad/hooks/provision-target.sh  — lives on the server, never committed
+#!/bin/bash
+set -euo pipefail
+TARGET_PATH="$1"
+cp ~/.brad/secrets/my-project.env "$TARGET_PATH/.env"
+# Start services the test suite needs, e.g.:
+# docker compose -f "$TARGET_PATH/docker-compose.yml" up -d
+```
+
+```bash
+chmod 700 ~/.brad/hooks/provision-target.sh
+# In brad's .env:
+TARGET_REPO_PROVISION_HOOK=/home/you/.brad/hooks/provision-target.sh
+```
+
+Keep `~/.brad/secrets/` (or wherever you store the secrets file) outside of any git repository. The hook itself must also never be committed. If the hook exits non-zero, Brad logs the error but does not abort — an already-provisioned workspace still works.
+
 ## 📖 Usage
 
 ### Run Brad Once

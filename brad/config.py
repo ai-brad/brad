@@ -76,6 +76,14 @@ class Config:
     codex_approval: str = "danger"
     codex_timeout: int = 3600
 
+    # Optional path to a shell script that Brad runs once after cloning the
+    # target repo (and again whenever the clone is re-created from scratch).
+    # The script receives the absolute clone path as its first argument ($1).
+    # Use it to drop the target repo's own .env, start companion services, etc.
+    # The script must be executable and must NOT be committed to version control.
+    # Example: /home/you/.brad/hooks/provision-bea.sh
+    target_repo_provision_hook: Optional[str] = None
+
 
 def load_config() -> Config:
     deployments_raw = os.environ.get("AZURE_DEPLOYMENTS", "")
@@ -104,6 +112,7 @@ def load_config() -> Config:
 
         target_repo_path=target_repo_path,
         workspace_dir=workspace_dir,
+        target_repo_provision_hook=os.environ.get("TARGET_REPO_PROVISION_HOOK") or None,
 
         azure_openai_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT", ""),
         azure_openai_api_key=os.environ.get("AZURE_OPENAI_API_KEY", ""),
