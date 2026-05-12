@@ -73,10 +73,11 @@ class AIAgentInterface:
         iteration: int,
         previous_response_id: Optional[str] = None,
         dev_instructions: str = "",
+        existing_pr: Optional[int] = None,
     ) -> Dict:
         self.logger.info(f"Implementation: {issue_key} (iteration {iteration})")
         pre_search = self._pre_search_codebase(description, repo_path)
-        prompt = self._build_implementation_prompt(issue_key, description, attachment_paths, branch_name, iteration, pre_search, dev_instructions)
+        prompt = self._build_implementation_prompt(issue_key, description, attachment_paths, branch_name, iteration, pre_search, dev_instructions, existing_pr)
         codebase_map = get_codebase_map(repo_path)
         result = self.harness.run(prompt, repo_path, system_prompt=codebase_map, previous_response_id=previous_response_id)
         parsed = self._parse_implementation_response(result.text)
@@ -307,7 +308,7 @@ class AIAgentInterface:
             attachments_text=attachments_text,
         )
 
-    def _build_implementation_prompt(self, issue_key, description, attachment_paths, branch_name, iteration, pre_search="", dev_instructions=""):
+    def _build_implementation_prompt(self, issue_key, description, attachment_paths, branch_name, iteration, pre_search="", dev_instructions="", existing_pr=None):
         attachments_text = ""
         if attachment_paths:
             attachments_text = "\n\nAttachments:\n" + "\n".join(
@@ -320,6 +321,10 @@ class AIAgentInterface:
 
         dev_instructions_section = f"\nREPOSITORY DEV INSTRUCTIONS (follow these when running commands, tests, etc.):\n{dev_instructions}\n" if dev_instructions else ""
 
+        continuation_context = ""
+        if existing_pr:
+            continuation_context = f"\n\nCONTINUATION NOTICE: This branch already has work in progress on PR #{existing_pr}. Review the current state of the branch and continue implementing from where it left off, rather than starting from scratch.\n"
+
         template = self._load_prompt("implementation.txt")
         return template.format(
             issue_key=issue_key,
@@ -329,6 +334,7 @@ class AIAgentInterface:
             attachments_text=attachments_text,
             pre_search_text=pre_search_text,
             dev_instructions_section=dev_instructions_section,
+            continuation_context=continuation_context,
         )
 
     def _build_ci_fix_prompt(self, issue_key, description, ci_logs, failed_jobs, pr_number, iteration, failed_test_target=None, dev_instructions=""):

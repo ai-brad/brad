@@ -71,7 +71,7 @@ def test_implementation_phase_routes_failed_local_review_into_fix_loop(
     state.pr_number = None
 
     orchestrator.repo.reset_to_clean_state = Mock()
-    orchestrator.repo.branch_exists_remote.return_value = False
+    orchestrator.repo.branch_exists_remote = Mock(return_value=False)
     orchestrator.repo.prepare_branch = Mock()
     invoke_implementation = Mock(
         return_value={
@@ -165,3 +165,102 @@ def test_local_review_fix_stops_at_iteration_limit(temp_git_repo, monkeypatch):
     assert result is False
     invoke_local_review_fix.assert_not_called()
     ticket_comment.assert_called_once()
+
+
+def test_scrap_existing_pr_deletes_old_branch_only_after_pr_close(temp_git_repo, monkeypatch):
+    orchestrator, _ = make_orchestrator(temp_git_repo)
+    orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=123)
+    orchestrator.repo.reset_to_clean_state = Mock()
+
+    commands = []
+    orchestrator.code_repo.close_pr = Mock(side_effect=lambda *args, **kwargs: commands.append(("close_pr",)))
+    orchestrator.repo._run_git = Mock(side_effect=lambda *args, **kwargs: commands.append(args) or SimpleNamespace())
+    monkeypatch.setattr("brad.orchestrator.time.time", lambda: 1700000000)
+
+    result = orchestrator._scrap_existing_pr("DEV-123", "DEV-123")
+
+    assert result is True
+    orchestrator.code_repo.close_pr.assert_called_once()
+    assert commands == [
+        ("fetch", "origin", "DEV-123"),
+        ("checkout", "DEV-123"),
+        ("branch", "-m", "DEV-123", "brad/old-1700000000-DEV-123"),
+        ("push", "-u", "origin", "brad/old-1700000000-DEV-123", "--force"),
+        ("close_pr",),
+        ("push", "origin", "--delete", "DEV-123"),
+        ("branch", "-D", "DEV-123"),
+    ]
+
+
+def test_scrap_existing_pr_keeps_old_branch_when_close_fails(temp_git_repo, monkeypatch):
+    orchestrator, _ = make_orchestrator(temp_git_repo)
+    orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=123)
+    orchestrator.code_repo.close_pr = Mock(side_effect=RuntimeError("close failed"))
+    orchestrator.repo.reset_to_clean_state = Mock()
+    orchestrator.repo._run_git = Mock(return_value=SimpleNamespace())
+    monkeypatch.setattr("brad.orchestrator.time.time", lambda: 1700000000)
+
+    result = orchestrator._scrap_existing_pr("DEV-123", "DEV-123")
+
+    assert result is False
+    assert not any(call.args[:3] == ("push", "origin", "--delete") for call in orchestrator.repo._run_git.mock_calls)
+
+
+def test_process_issue_aborts_when_scrap_fails(temp_git_repo, monkeypatch):
+    orchestrator, _ = make_orchestrator(temp_git_repo)
+    issue = {
+        "key": "DEV-123",
+        "fields": {
+            "summary": "Implement feature",
+            "description": "Details",
+            "attachment": [],
+            "labels": ["BradScrapExisting"],
+            "updated": "2025-01-01",
+        },
+    }
+    orchestrator._scrap_existing_pr = Mock(return_value=False)
+    orchestrator._handle_implementation_phase = Mock()
+
+    monkeypatch.setattr(db, "create_execution", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    finish_execution = Mock()
+    monkeypatch.setattr(db, "finish_execution", finish_execution)
+
+    orchestrator._process_issue(issue)
+
+    orchestrator._handle_implementation_phase.assert_not_called()
+    finish_execution.assert_called_with(
+        1,
+        status="error",
+        error_message="Brad could not safely scrap the existing PR",
+    )
+
+
+def test_process_issue_continues_when_scrap_label_removal_fails(temp_git_repo, monkeypatch):
+    orchestrator, _ = make_orchestrator(temp_git_repo)
+    issue = {
+        "key": "DEV-123",
+        "fields": {
+            "summary": "Implement feature",
+            "description": "Details",
+            "attachment": [],
+            "labels": ["BradScrapExisting"],
+            "updated": "2025-01-01",
+        },
+    }
+    orchestrator._scrap_existing_pr = Mock(return_value=True)
+    def remove_label(issue_key, label):
+        if label == "BradScrapExisting":
+            raise RuntimeError("jira unavailable")
+
+    orchestrator.ticketing.remove_label = Mock(side_effect=remove_label)
+    orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=None)
+    orchestrator._handle_implementation_phase = Mock()
+
+    monkeypatch.setattr(db, "create_execution", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "finish_execution", lambda *args, **kwargs: None)
+
+    orchestrator._process_issue(issue)
+
+    orchestrator._handle_implementation_phase.assert_called_once()

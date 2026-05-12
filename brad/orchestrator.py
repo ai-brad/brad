@@ -609,6 +609,87 @@ class BradOrchestrator:
         except Exception as e:
             self.logger.warning(f"Could not post PR #{pr_number} comment: {e}")
 
+    def _scrap_existing_pr(self, issue_key: str, branch_name: str) -> bool:
+        """Scrap existing PR by renaming branch and closing it.
+        
+        Returns True if successful, False otherwise.
+        """
+        existing_pr = self.code_repo.pr_exists_for_branch(branch_name)
+        if not existing_pr:
+            self.logger.info(f"{issue_key}: No existing PR to scrap")
+            return True
+
+        self.logger.info(f"{issue_key}: Scrapping existing PR #{existing_pr}")
+
+        # Rename the branch
+        old_branch_name = branch_name
+        new_branch_name = f"brad/old-{int(time.time())}-{branch_name}"
+
+        try:
+            # Ensure workspace is clean before git operations
+            self.repo.reset_to_clean_state("main")
+
+            # Fetch and checkout the branch
+            self.repo._run_git("fetch", "origin", old_branch_name)
+            self.repo._run_git("checkout", old_branch_name)
+
+            # Rename locally
+            self.repo._run_git("branch", "-m", old_branch_name, new_branch_name)
+
+            # Push renamed branch
+            self.repo._run_git("push", "-u", "origin", new_branch_name, "--force")
+
+            self.logger.info(f"{issue_key}: Renamed branch {old_branch_name} to {new_branch_name}")
+        except Exception as e:
+            self.logger.error(f"{issue_key}: Failed to rename branch: {e}")
+            self.ticketing.comment(
+                issue_key,
+                f"Brad failed to rename the existing branch due to an error: {str(e)}. "
+                f"Please manually rename `{old_branch_name}` to `{new_branch_name}` and close PR #{existing_pr}."
+            )
+            try:
+                self.repo.reset_to_clean_state("main")
+            except Exception:
+                pass
+            return False
+
+        # Close the PR with a comment
+        try:
+            self.code_repo.close_pr(
+                existing_pr,
+                comment=f"Scrapping this PR per BradScrapExisting label. Branch renamed to `{new_branch_name}` for recovery."
+            )
+            self.logger.info(f"{issue_key}: Closed PR #{existing_pr}")
+        except Exception as e:
+            self.logger.error(f"{issue_key}: Failed to close PR: {e}")
+            try:
+                self.repo.reset_to_clean_state("main")
+            except Exception:
+                pass
+            return False
+
+        try:
+            self.repo._run_git("push", "origin", "--delete", old_branch_name)
+            self.repo._run_git("branch", "-D", old_branch_name, check=False)
+        except Exception as e:
+            self.logger.warning(f"{issue_key}: Failed to delete old branch after closing PR: {e}")
+
+        # Comment on Jira
+        self.ticketing.comment(
+            issue_key,
+            f"Brad has scrapped the existing PR #{existing_pr} per the BradScrapExisting label. "
+            f"The branch has been renamed to `{new_branch_name}` for recovery. "
+            f"Starting fresh implementation."
+        )
+
+        # Restore workspace to clean state
+        try:
+            self.repo.reset_to_clean_state("main")
+        except Exception as e:
+            self.logger.warning(f"{issue_key}: Failed to reset workspace after scrap: {e}")
+
+        return True
+
     def _process_review_comments(self):
         """Check all Brad PRs for new review comments (both file-level and PR-level) and process them."""
         brad_prs = self.code_repo.get_brad_prs()
@@ -1061,8 +1142,27 @@ class BradOrchestrator:
                 cost_budget=float(self.cfg.__dict__.get("cost_budget")),
             )
 
-            # Step 4: Detect existing PR — continue on it instead of restarting.
-            # To force a fresh start, close the PR and delete the branch manually before re-labeling.
+            # Step 4: Check for BradScrapExisting label — scrap existing work if present
+            has_scrap_label = "BradScrapExisting" in issue.get("fields", {}).get("labels", [])
+            if has_scrap_label:
+                self._set_phase(state, "scrapping_existing", "Scrapping existing PR and branch")
+                scrap_success = self._scrap_existing_pr(issue_key, branch_name)
+                if scrap_success:
+                    try:
+                        self.ticketing.remove_label(issue_key, "BradScrapExisting")
+                    except Exception as e:
+                        self.logger.warning(f"{issue_key}: Failed to remove BradScrapExisting label: {e}")
+                else:
+                    self._set_phase(state, "stuck", "Could not scrap existing PR")
+                    db.finish_execution(
+                        execution_id,
+                        status="error",
+                        error_message="Brad could not safely scrap the existing PR",
+                    )
+                    return
+
+            # Step 5: Detect existing PR — continue on it instead of restarting.
+            # To force a fresh start, use BradScrapExisting label instead of manual intervention.
             self._set_phase(state, "checking_existing_pr", "Checking for existing PR to continue")
             existing_pr = self.code_repo.pr_exists_for_branch(branch_name)
             if existing_pr:
@@ -1070,10 +1170,10 @@ class BradOrchestrator:
                 self.ticketing.comment(
                     issue_key,
                     f"Brad is continuing work on existing PR #{existing_pr}. "
-                    f"To restart from scratch, close the PR and delete the `{branch_name}` branch before re-applying the label."
+                    f"To restart from scratch, add the BradScrapExisting label before BradReview."
                 )
 
-            self._handle_implementation_phase(state)
+            self._handle_implementation_phase(state, existing_pr)
 
             # Finish execution with status reflecting actual outcome
             final_status = "completed" if state.pr_number else "stuck"
@@ -1132,11 +1232,12 @@ class BradOrchestrator:
             self.ticketing.comment(state.issue_key, message)
         elif action == "ready":
             self.ticketing.comment(state.issue_key, "Requirements are clear. Brad is starting implementation.")
-            self._handle_implementation_phase(state)
+            existing_pr = self.code_repo.pr_exists_for_branch(state.branch_name)
+            self._handle_implementation_phase(state, existing_pr)
         else:
             self.ticketing.comment(state.issue_key, f"Brad encountered an error during requirements analysis:\n\n{message}\n\nBrad is stuck.")
 
-    def _handle_implementation_phase(self, state: IssueState):
+    def _handle_implementation_phase(self, state: IssueState, existing_pr: Optional[int] = None):
         """Handle implementation phase — impl → local review loop → then create PR → CI."""
         self._set_phase(state, "implementing", "Writing code and tests")
         self.ticketing.comment(state.issue_key, f"Brad is starting implementation for {state.issue_key}...")
@@ -1157,6 +1258,7 @@ class BradOrchestrator:
             branch_name=state.branch_name, iteration=0,
             previous_response_id=state.last_response_id,
             dev_instructions=self._repo_dev_instructions,
+            existing_pr=existing_pr,
         )
         state.last_response_id = response.get("_response_id")
 

@@ -2,7 +2,7 @@ You are Brad, an autonomous software engineer implementing issue {issue_key}.
 
 Branch: {branch_name}
 Iteration: {iteration}
-
+{continuation_context}
 Requirements:
 {description}
 {attachments_text}
