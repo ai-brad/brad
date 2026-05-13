@@ -99,6 +99,60 @@ def finish_execution(execution_id: int, status: str = "completed", pr_number: Op
     logger.info(f"Execution #{execution_id} finished: {status}")
 
 
+def reconcile_running_executions(
+    error_message: str = "Worker restarted during execution",
+) -> int:
+    """Mark any stale running executions/steps as failed.
+
+    This should only be called by the worker process during startup. The GUI also
+    initializes the database and must not mutate execution state.
+    """
+    with _get_conn() as conn:
+        running = conn.execute(
+            "SELECT id FROM executions WHERE status = 'running'"
+        ).fetchall()
+        if not running:
+            return 0
+
+        execution_ids = [row["id"] for row in running]
+        finished_at = _now()
+        placeholders = ",".join("?" for _ in execution_ids)
+
+        conn.execute(
+            f"""
+            UPDATE executions
+               SET status = 'failed',
+                   finished_at = COALESCE(finished_at, ?),
+                   error_message = COALESCE(error_message, ?),
+                   current_phase_detail = CASE
+                       WHEN current_phase_detail IS NULL OR current_phase_detail = ''
+                       THEN ?
+                       ELSE current_phase_detail
+                   END
+             WHERE id IN ({placeholders})
+            """,
+            (finished_at, error_message, error_message, *execution_ids),
+        )
+        conn.execute(
+            f"""
+            UPDATE steps
+               SET status = 'failed',
+                   finished_at = COALESCE(finished_at, ?),
+                   result_summary = COALESCE(result_summary, ?)
+             WHERE execution_id IN ({placeholders})
+               AND status = 'running'
+            """,
+            (finished_at, error_message, *execution_ids),
+        )
+
+    logger.warning(
+        "Reconciled %d stale running execution(s) on startup: %s",
+        len(execution_ids),
+        execution_ids,
+    )
+    return len(execution_ids)
+
+
 def update_execution_costs(execution_id: int, prompt_tokens: int, completion_tokens: int, cost: float) -> None:
     """Add token usage and cost to an execution's totals."""
     with _get_conn() as conn:

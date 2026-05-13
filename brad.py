@@ -15,6 +15,9 @@ from brad.orchestrator import BradOrchestrator
 from brad import db
 
 
+STALE_EXECUTION_MESSAGE = "Worker restarted during execution"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Brad - Autonomous AI Software Engineer",
@@ -85,6 +88,12 @@ Examples:
         # Initialize database
         db.init_db(cfg.db_path)
         logger.info(f"Database initialized at {cfg.db_path}")
+        reconciled = db.reconcile_running_executions(STALE_EXECUTION_MESSAGE)
+        if reconciled:
+            logger.warning(
+                "Marked %d stale running execution(s) as failed during startup",
+                reconciled,
+            )
 
     except Exception as e:
         print(f"Configuration error: {e}", file=sys.stderr)
