@@ -88,6 +88,30 @@ class TestDatabaseIntegration:
         # Verify updated
         cost = db.get_model_cost("gpt-4")
         assert cost["prompt"] == 0.04
+
+    def test_reconcile_running_executions_marks_stale_rows_failed(self, temp_db):
+        """Startup cleanup should fail stale running executions and steps."""
+        exec_id = db.create_execution("TEST-STALE", "Stale issue")
+        db.update_execution_phase(exec_id, "implementing", "Writing code and tests")
+        step_id = db.create_step(exec_id, "implementation", "Running LLM implementation agent")
+
+        reconciled = db.reconcile_running_executions("Worker restarted during execution")
+
+        assert reconciled == 1
+
+        execution = db.get_execution(exec_id)
+        assert execution["status"] == "failed"
+        assert execution["finished_at"] is not None
+        assert execution["error_message"] == "Worker restarted during execution"
+        assert execution["current_phase"] == "implementing"
+        assert execution["current_phase_detail"] == "Writing code and tests"
+
+        steps = db.get_execution_steps(exec_id)
+        assert len(steps) == 1
+        assert steps[0]["id"] == step_id
+        assert steps[0]["status"] == "failed"
+        assert steps[0]["finished_at"] is not None
+        assert steps[0]["result_summary"] == "Worker restarted during execution"
     
     def test_repo_metadata_caching(self, temp_db):
         """Test repository metadata caching."""
