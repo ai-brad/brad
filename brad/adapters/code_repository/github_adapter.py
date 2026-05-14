@@ -184,6 +184,9 @@ class GitHubAdapter(CodeRepositoryAdapter):
     def _has_brad_signature(self, body: str) -> bool:
         return any(body.startswith(prefix) for prefix in self._BRAD_PREFIXES) or self._BRAD_COMMENT_MARKER in body
 
+    def _normalized_brad_body(self, body: str) -> str:
+        return body.replace(self._BRAD_COMMENT_MARKER, "").strip()
+
     def is_brad_comment(self, comment: Dict) -> bool:
         """Return True when a GitHub comment/review can be trusted as Brad-authored."""
         body = self._comment_body(comment)
@@ -240,7 +243,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 # Check the thread conversation
                 thread_replies = replies_by_parent.get(comment_id, [])
                 if thread_replies:
-                    last_reply_body = self._comment_body(thread_replies[-1])
+                    last_reply_body = self._normalized_brad_body(self._comment_body(thread_replies[-1]))
                     brad_spoke_last = self.is_brad_comment(thread_replies[-1])
                     
                     # Detect interrupted work: last reply is ONLY the checking message
@@ -258,7 +261,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                     # Detect ongoing conversation: find all Brad substantive responses
                     brad_substantive_indices = []
                     for i, reply in enumerate(thread_replies):
-                        reply_body = self._comment_body(reply)
+                        reply_body = self._normalized_brad_body(self._comment_body(reply))
                         if self.is_brad_comment(reply) and reply_body != self._REVIEW_CHECKING_MESSAGE:
                             brad_substantive_indices.append(i)
                     
@@ -575,6 +578,17 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.info(f"PR #{pr_number}: Found {len(all_comments)} total issue comments")
 
             _BOT_SUFFIXES = ('[bot]',)
+            try:
+                pr_belongs_to_brad = db.pr_belongs_to_brad(pr_number)
+                has_ongoing_work = db.has_ongoing_work_for_pr(pr_number)
+            except Exception as exc:
+                self.logger.debug(
+                    "Could not load PR ownership/work state for PR #%s: %s",
+                    pr_number,
+                    exc,
+                )
+                pr_belongs_to_brad = False
+                has_ongoing_work = False
             
             needs_response = []
             
@@ -596,7 +610,8 @@ class GitHubAdapter(CodeRepositoryAdapter):
                     self.logger.debug(f"Issue comment {comment_id} is Brad's own response - skipping")
                     continue
 
-                if comment_body in (self._ISSUE_CHECKING_MESSAGE, self._REVIEW_CHECKING_MESSAGE):
+                normalized_comment_body = self._normalized_brad_body(comment_body)
+                if normalized_comment_body in (self._ISSUE_CHECKING_MESSAGE, self._REVIEW_CHECKING_MESSAGE):
                     self.logger.warning(
                         "Issue comment %s looks like a stale/manual Brad claim message from %s; ignoring it",
                         comment_id,
@@ -609,6 +624,17 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 for j in range(i + 1, len(sorted_comments)):
                     next_comment = sorted_comments[j]
                     if self.is_brad_comment(next_comment):
+                        next_body = self._normalized_brad_body(self._comment_body(next_comment))
+                        if (
+                            next_body == self._ISSUE_CHECKING_MESSAGE
+                            and pr_belongs_to_brad
+                            and not has_ongoing_work
+                        ):
+                            self.logger.info(
+                                "Issue comment %s — INTERRUPTED WORK detected (checking message, Brad's PR, no ongoing work) — RESUMING",
+                                comment_id,
+                            )
+                            continue
                         brad_responded = True
                         break
                     # If we hit another human comment before a Brad response, stop looking

@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import Mock, patch
 from brad.adapters.code_repository.github_adapter import GitHubAdapter
+from brad import db
 from test_helpers import make_test_config
 
 
@@ -331,3 +332,33 @@ def test_reply_to_issue_comment_appends_hidden_marker(github_client):
         github_client.reply_to_issue_comment(2375, 1, "Brad checking...")
 
     assert mock_post.call_args.kwargs["json"]["body"].endswith("<!-- brad:comment -->")
+
+
+def test_get_issue_comments_resumes_after_interrupted_checking_reply(github_client):
+    """A claim-only issue reply should not suppress follow-up after a restart."""
+    issue_comments = [
+        {
+            "id": 1,
+            "body": "Please make the button match the forward action",
+            "user": {"login": "human-user"},
+            "created_at": "2026-05-14T10:25:15Z",
+            "performed_via_github_app": None,
+        },
+        {
+            "id": 2,
+            "body": "Brad checking...\n\n<!-- brad:comment -->",
+            "user": {"login": "flaero-brad-bot[bot]"},
+            "created_at": "2026-05-14T10:27:58Z",
+            "performed_via_github_app": {"id": 123},
+        },
+    ]
+    github_client._github_app_id = "123"
+
+    with patch.object(
+        github_client, "fetch_issue_comments", return_value=issue_comments
+    ), patch.object(db, "pr_belongs_to_brad", return_value=True), patch.object(
+        db, "has_ongoing_work_for_pr", return_value=False
+    ):
+        needs_response = github_client.get_issue_comments_needing_response(2375)
+
+    assert [c["id"] for c in needs_response] == [1]
