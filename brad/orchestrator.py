@@ -777,8 +777,7 @@ class BradOrchestrator:
             replies = self.code_repo.get_comment_replies(pr_number, comment['id'])
             # Filter out Brad's own "checking..." and final response messages from context
             non_brad_replies = [r for r in replies if not (
-                r.get('body', '').startswith('Brad reaction: ') or 
-                r.get('body', '').startswith('Brad checking')
+                self.code_repo.is_brad_comment(r)
             )]
             enriched = comment.copy()
             enriched['_thread_replies'] = non_brad_replies

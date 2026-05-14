@@ -129,11 +129,7 @@ def create_app(db_path: str = None) -> Flask:
             enriched = []
             for c in comments:
                 replies = adapter.get_comment_replies(pr_number, c["id"])
-                brad_replied = any(
-                    r.get("body", "").startswith("Brad reaction: ")
-                    or r.get("body", "").startswith("Brad checking")
-                    for r in replies
-                )
+                brad_replied = any(adapter.is_brad_comment(r) for r in replies)
                 enriched.append({
                     "id": c["id"],
                     "user": c.get("user", {}).get("login", "unknown"),

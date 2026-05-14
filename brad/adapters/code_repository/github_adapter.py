@@ -11,6 +11,11 @@ from brad import db
 class GitHubAdapter(CodeRepositoryAdapter):
     """GitHub implementation of the CodeRepositoryAdapter interface."""
 
+    _BRAD_PREFIXES = ("Brad ",)
+    _REVIEW_CHECKING_MESSAGE = "Brad reaction: checking..."
+    _ISSUE_CHECKING_MESSAGE = "Brad checking..."
+    _BRAD_COMMENT_MARKER = "<!-- brad:comment -->"
+
     def __init__(self, cfg):
         self.logger = get_logger(__name__)
         self.repo = cfg.github_repo
@@ -18,6 +23,15 @@ class GitHubAdapter(CodeRepositoryAdapter):
         self.base_url = f"https://api.github.com/repos/{self.repo}"
         self._max_retries = 5
         self._base_wait = 5  # seconds
+        self._github_app_id = str(getattr(cfg, "github_app_id", "") or "") or None
+        self._require_brad_author_identity = bool(
+            getattr(cfg, "github_require_brad_author_identity", True)
+        )
+        self._brad_author_logins = {
+            login.strip()
+            for login in (getattr(cfg, "github_brad_author_logins", []) or [])
+            if login and login.strip()
+        }
         self.logger.info(f"Initialized GitHub adapter for {self.repo}")
 
     @property
@@ -153,6 +167,37 @@ class GitHubAdapter(CodeRepositoryAdapter):
             self.logger.exception("Failed to fetch Brad PRs")
             return []
 
+    def _comment_body(self, comment: Dict) -> str:
+        return (comment.get("body") or "").strip()
+
+    def _comment_author_login(self, comment: Dict) -> str:
+        return ((comment.get("user") or {}).get("login") or "").strip()
+
+    def _is_brad_authored_via_app(self, comment: Dict) -> bool:
+        via_app = comment.get("performed_via_github_app") or {}
+        via_app_id = via_app.get("id")
+        return bool(self._github_app_id and via_app_id is not None and str(via_app_id) == self._github_app_id)
+
+    def _is_known_brad_author(self, comment: Dict) -> bool:
+        return self._comment_author_login(comment) in self._brad_author_logins
+
+    def _has_brad_signature(self, body: str) -> bool:
+        return any(body.startswith(prefix) for prefix in self._BRAD_PREFIXES) or self._BRAD_COMMENT_MARKER in body
+
+    def is_brad_comment(self, comment: Dict) -> bool:
+        """Return True when a GitHub comment/review can be trusted as Brad-authored."""
+        body = self._comment_body(comment)
+        if not self._has_brad_signature(body):
+            return False
+        if not self._require_brad_author_identity:
+            return True
+        return self._is_brad_authored_via_app(comment) or self._is_known_brad_author(comment)
+
+    def _format_brad_comment(self, body: str) -> str:
+        if self._BRAD_COMMENT_MARKER in body:
+            return body
+        return f"{body}\n\n{self._BRAD_COMMENT_MARKER}"
+
     def get_review_comments_needing_response(self, pr_number: int) -> List[Dict]:
         """Get review comments that don't have a Brad response yet.
 
@@ -166,15 +211,6 @@ class GitHubAdapter(CodeRepositoryAdapter):
         try:
             all_comments = self.fetch_review_comments(pr_number)
             self.logger.info(f"PR #{pr_number}: Found {len(all_comments)} total review comments")
-
-            # Match every Brad-authored PR comment. All Brad messages start
-            # with 'Brad ' (e.g. 'Brad reaction: ...', 'Brad checking...',
-            # 'Brad auto-resolved rebase conflicts...', 'Brad attempted to ...').
-            # Using only the narrower prefixes caused infinite-response loops
-            # when a non-prefixed Brad message (like the rebase notice) sat
-            # immediately after a human comment.
-            _BRAD_PREFIXES = ('Brad ',)
-            _CHECKING_MESSAGE = 'Brad reaction: checking...'
 
             # Check PR ownership and ongoing work status
             pr_belongs_to_brad = db.pr_belongs_to_brad(pr_number)
@@ -197,19 +233,19 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 comment_body = comment.get('body', '')
 
                 # Skip if comment itself is from Brad
-                if any(comment_body.startswith(p) for p in _BRAD_PREFIXES):
+                if self.is_brad_comment(comment):
                     self.logger.debug(f"Comment {comment_id} is Brad's own response - skipping")
                     continue
 
                 # Check the thread conversation
                 thread_replies = replies_by_parent.get(comment_id, [])
                 if thread_replies:
-                    last_reply_body = thread_replies[-1].get('body', '')
-                    brad_spoke_last = any(last_reply_body.startswith(p) for p in _BRAD_PREFIXES)
+                    last_reply_body = self._comment_body(thread_replies[-1])
+                    brad_spoke_last = self.is_brad_comment(thread_replies[-1])
                     
                     # Detect interrupted work: last reply is ONLY the checking message
                     is_interrupted_work = (
-                        last_reply_body == _CHECKING_MESSAGE and
+                        last_reply_body == self._REVIEW_CHECKING_MESSAGE and
                         pr_belongs_to_brad and
                         not has_ongoing_work
                     )
@@ -222,8 +258,8 @@ class GitHubAdapter(CodeRepositoryAdapter):
                     # Detect ongoing conversation: find all Brad substantive responses
                     brad_substantive_indices = []
                     for i, reply in enumerate(thread_replies):
-                        reply_body = reply.get('body', '')
-                        if any(reply_body.startswith(p) for p in _BRAD_PREFIXES) and reply_body != _CHECKING_MESSAGE:
+                        reply_body = self._comment_body(reply)
+                        if self.is_brad_comment(reply) and reply_body != self._REVIEW_CHECKING_MESSAGE:
                             brad_substantive_indices.append(i)
                     
                     # If Brad has replied substantively, check if there are human replies after the SECOND-TO-LAST Brad response
@@ -235,8 +271,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                         # Check if there's a human reply between the second-to-last and last Brad responses
                         human_replied_between = False
                         for i in range(second_to_last_brad_idx + 1, last_brad_idx):
-                            reply_body = thread_replies[i].get('body', '')
-                            if not any(reply_body.startswith(p) for p in _BRAD_PREFIXES):
+                            if not self.is_brad_comment(thread_replies[i]):
                                 human_replied_between = True
                                 break
                         
@@ -303,7 +338,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
             resp = self._request_with_retry(
                 "post",
                 f"{self.base_url}/pulls/{pr_number}/comments/{comment_id}/replies",
-                json={"body": body},
+                json={"body": self._format_brad_comment(body)},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -539,7 +574,6 @@ class GitHubAdapter(CodeRepositoryAdapter):
             all_comments = self.fetch_issue_comments(pr_number)
             self.logger.info(f"PR #{pr_number}: Found {len(all_comments)} total issue comments")
 
-            _BRAD_PREFIXES = ('Brad ',)
             _BOT_SUFFIXES = ('[bot]',)
             
             needs_response = []
@@ -558,20 +592,27 @@ class GitHubAdapter(CodeRepositoryAdapter):
                     continue
 
                 # Skip if comment itself is from Brad
-                if any(comment_body.startswith(p) for p in _BRAD_PREFIXES):
+                if self.is_brad_comment(comment):
                     self.logger.debug(f"Issue comment {comment_id} is Brad's own response - skipping")
+                    continue
+
+                if comment_body in (self._ISSUE_CHECKING_MESSAGE, self._REVIEW_CHECKING_MESSAGE):
+                    self.logger.warning(
+                        "Issue comment %s looks like a stale/manual Brad claim message from %s; ignoring it",
+                        comment_id,
+                        comment_author,
+                    )
                     continue
 
                 # Check if there's a Brad response after this comment
                 brad_responded = False
                 for j in range(i + 1, len(sorted_comments)):
                     next_comment = sorted_comments[j]
-                    next_body = next_comment.get('body', '')
-                    if any(next_body.startswith(p) for p in _BRAD_PREFIXES):
+                    if self.is_brad_comment(next_comment):
                         brad_responded = True
                         break
                     # If we hit another human comment before a Brad response, stop looking
-                    if not any(next_body.startswith(p) for p in _BRAD_PREFIXES):
+                    if not self.is_brad_comment(next_comment):
                         break
                 
                 if not brad_responded:
@@ -603,7 +644,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
         """Reply to a specific issue comment (general PR comment)."""
         self.logger.info(f"Replying to issue comment {comment_id} on PR #{pr_number}")
         try:
-            payload = {"body": body}
+            payload = {"body": self._format_brad_comment(body)}
             resp = self._request_with_retry(
                 "post",
                 f"{self.base_url}/issues/{pr_number}/comments",
@@ -631,7 +672,6 @@ class GitHubAdapter(CodeRepositoryAdapter):
             all_reviews = resp.json()
             self.logger.info(f"PR #{pr_number}: Found {len(all_reviews)} total reviews")
 
-            _BRAD_PREFIXES = ('Brad ',)
             _BOT_SUFFIXES = ('[bot]',)
 
             needs_response = []
@@ -655,7 +695,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                     continue
 
                 # Skip if review itself is from Brad
-                if any(review_body.startswith(p) for p in _BRAD_PREFIXES):
+                if self.is_brad_comment(review):
                     self.logger.debug(f"Review {review_id} is Brad's own review - skipping")
                     continue
 
@@ -665,8 +705,7 @@ class GitHubAdapter(CodeRepositoryAdapter):
                 brad_responded = False
                 for comment in all_issue_comments:
                     comment_time = comment.get('created_at', '')
-                    comment_body = comment.get('body', '')
-                    if comment_time > review_time and any(comment_body.startswith(p) for p in _BRAD_PREFIXES):
+                    if comment_time > review_time and self.is_brad_comment(comment):
                         brad_responded = True
                         break
 

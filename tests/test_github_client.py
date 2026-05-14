@@ -7,7 +7,10 @@ from test_helpers import make_test_config
 @pytest.fixture
 def mock_config(tmp_path):
     """Create a mock config for testing."""
-    return make_test_config(tmp_path)
+    return make_test_config(
+        tmp_path,
+        github_brad_author_logins=["brad-bot"],
+    )
 
 
 @pytest.fixture
@@ -258,3 +261,73 @@ def test_get_issue_comments_flags_truly_unanswered_comment(github_client):
         needs_response = github_client.get_issue_comments_needing_response(2355)
 
     assert [c["id"] for c in needs_response] == [2]
+
+
+def test_get_issue_comments_does_not_trust_human_brad_prefix_when_identity_required(github_client):
+    """A human 'Brad checking...' artifact must not suppress the real request."""
+    issue_comments = [
+        {
+            "id": 1,
+            "body": "Please make the button match the forward action",
+            "user": {"login": "sebastian-dix-flaerobotics-ai"},
+            "created_at": "2026-05-14T10:25:15Z",
+            "performed_via_github_app": None,
+        },
+        {
+            "id": 2,
+            "body": "Brad checking...",
+            "user": {"login": "sebastian-dix-flaerobotics-ai"},
+            "created_at": "2026-05-14T10:27:58Z",
+            "performed_via_github_app": None,
+        },
+    ]
+
+    with patch.object(
+        github_client, "fetch_issue_comments", return_value=issue_comments
+    ):
+        needs_response = github_client.get_issue_comments_needing_response(2375)
+
+    assert [c["id"] for c in needs_response] == [1]
+
+
+def test_get_issue_comments_accepts_app_authored_brad_reply(github_client):
+    """App-authored comments from this Brad app should count as Brad responses."""
+    issue_comments = [
+        {
+            "id": 1,
+            "body": "Please make the button match the forward action",
+            "user": {"login": "human-user"},
+            "created_at": "2026-05-14T10:25:15Z",
+            "performed_via_github_app": None,
+        },
+        {
+            "id": 2,
+            "body": "Brad checking...\n\n<!-- brad:comment -->",
+            "user": {"login": "flaero-brad-bot[bot]"},
+            "created_at": "2026-05-14T10:27:58Z",
+            "performed_via_github_app": {"id": 123},
+        },
+    ]
+    github_client._github_app_id = "123"
+
+    with patch.object(
+        github_client, "fetch_issue_comments", return_value=issue_comments
+    ):
+        needs_response = github_client.get_issue_comments_needing_response(2375)
+
+    assert needs_response == []
+
+
+def test_reply_to_issue_comment_appends_hidden_marker(github_client):
+    """Brad issue comments should carry an invisible machine marker."""
+    mock_response = Mock()
+    mock_response.raise_for_status = Mock()
+    mock_response.json.return_value = {"id": 123}
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.post",
+        return_value=mock_response,
+    ) as mock_post:
+        github_client.reply_to_issue_comment(2375, 1, "Brad checking...")
+
+    assert mock_post.call_args.kwargs["json"]["body"].endswith("<!-- brad:comment -->")

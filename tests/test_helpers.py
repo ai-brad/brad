@@ -29,6 +29,8 @@ def make_test_config(tmp_path, **overrides):
         github_app_installation_id=None,
         github_app_private_key=None,
         github_app_private_key_path=None,
+        github_require_brad_author_identity=True,
+        github_brad_author_logins=[],
         deployment_health_check=True,
         deployment_log_tail_lines=200,
         deployment_log_since="10m",

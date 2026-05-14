@@ -43,6 +43,8 @@ class Config:
     github_app_installation_id: Optional[str] = None
     github_app_private_key: Optional[str] = None
     github_app_private_key_path: Optional[str] = None
+    github_require_brad_author_identity: bool = True
+    github_brad_author_logins: List[str] = field(default_factory=list)
     azure_deployments: List[str] = field(default_factory=list)
     deployment_health_check: bool = True
     deployment_log_tail_lines: int = 200
@@ -99,6 +101,15 @@ def load_config() -> Config:
     github_app_installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
     github_app_private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
     github_app_private_key_path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None
+    github_require_brad_author_identity = (
+        os.environ.get("GITHUB_REQUIRE_BRAD_AUTHOR_IDENTITY", "true").lower() == "true"
+    )
+    github_brad_author_logins_raw = os.environ.get("GITHUB_BRAD_AUTHOR_LOGINS", "")
+    github_brad_author_logins = [
+        login.strip()
+        for login in github_brad_author_logins_raw.split(",")
+        if login.strip()
+    ]
 
     has_github_app_auth = bool(
         github_app_id and github_app_installation_id and (github_app_private_key or github_app_private_key_path)
@@ -150,6 +161,8 @@ def load_config() -> Config:
         github_app_installation_id=github_app_installation_id,
         github_app_private_key=github_app_private_key,
         github_app_private_key_path=github_app_private_key_path,
+        github_require_brad_author_identity=github_require_brad_author_identity,
+        github_brad_author_logins=github_brad_author_logins,
         azure_deployments=deployments,
         deployment_health_check=os.environ.get("DEPLOYMENT_HEALTH_CHECK", "true").lower() == "true",
         deployment_log_tail_lines=int(os.environ.get("DEPLOYMENT_LOG_TAIL_LINES", "200")),
