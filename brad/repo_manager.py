@@ -3,6 +3,8 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+from brad.github_auth import build_github_token_provider
 from brad.logging_config import get_logger
 
 
@@ -11,8 +13,9 @@ class RepoManager:
         self.logger = get_logger(__name__)
         self.repo_path = Path(cfg.target_repo_path)
         self.github_repo = getattr(cfg, "github_repo", "")
-        self.github_token = getattr(cfg, "github_token", "")
+        self.github = build_github_token_provider(cfg)
         self.provision_hook = getattr(cfg, "target_repo_provision_hook", None)
+        self._refreshing_origin = False
         self.logger.info(f"Initialized repo manager for {self.repo_path}")
 
         cloned = self._bootstrap_clone()
@@ -30,9 +33,9 @@ class RepoManager:
     # Bootstrap helpers
     # -------------------------
     def _tokenized_origin_url(self) -> Optional[str]:
-        if not self.github_repo or not self.github_token:
+        if not self.github_repo or not self.github.is_configured():
             return None
-        return f"https://x-access-token:{self.github_token}@github.com/{self.github_repo}.git"
+        return f"https://x-access-token:{self.github.get_token()}@github.com/{self.github_repo}.git"
 
     def _bootstrap_clone(self) -> bool:
         """If the target path is missing, clone github_repo into it via HTTPS+token.
@@ -61,7 +64,7 @@ class RepoManager:
         )
         if result.returncode != 0:
             # Redact the token from any error output
-            safe_err = (result.stderr or "").replace(self.github_token, "<redacted>")
+            safe_err = self.github.redact(result.stderr or "")
             raise RuntimeError(
                 f"Failed to clone {self.github_repo} into {self.repo_path}: {safe_err.strip()}"
             )
@@ -116,11 +119,15 @@ class RepoManager:
         url = self._tokenized_origin_url()
         if url is None:
             return
-        probe = self._run_git("remote", "get-url", "origin", check=False)
-        if probe.returncode != 0:
-            return
-        if probe.stdout.strip() != url:
-            self._run_git("remote", "set-url", "origin", url, check=False)
+        self._refreshing_origin = True
+        try:
+            probe = self._run_git("remote", "get-url", "origin", check=False, refresh_auth=False)
+            if probe.returncode != 0:
+                return
+            if probe.stdout.strip() != url:
+                self._run_git("remote", "set-url", "origin", url, check=False, refresh_auth=False)
+        finally:
+            self._refreshing_origin = False
 
     def _ensure_git_identity(self) -> None:
         """Set a sensible default user.email / user.name if none is configured.
@@ -136,9 +143,12 @@ class RepoManager:
     # -------------------------
     # Shell helpers
     # -------------------------
-    def _run_git(self, *args, check=True):
+    def _run_git(self, *args, check=True, refresh_auth=True):
         cmd = ["git", "-C", str(self.repo_path)] + list(args)
         self.logger.debug(f"Running git command: {' '.join(args)}")
+
+        if refresh_auth and args and args[0] in {"fetch", "push", "pull", "ls-remote"} and not self._refreshing_origin:
+            self._ensure_tokenized_origin()
 
         result = subprocess.run(
             cmd,
@@ -148,11 +158,12 @@ class RepoManager:
 
         if check and result.returncode != 0:
             self.logger.error(f"Git command failed: {' '.join(args)}")
-            self.logger.error(f"stdout: {result.stdout}")
-            self.logger.error(f"stderr: {result.stderr}")
+            self.logger.error(f"stdout: {self.github.redact(result.stdout)}")
+            self.logger.error(f"stderr: {self.github.redact(result.stderr)}")
             raise RuntimeError(
                 f"Git command failed: {' '.join(args)}\n"
-                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+                f"stdout: {self.github.redact(result.stdout)}\n"
+                f"stderr: {self.github.redact(result.stderr)}"
             )
 
         if result.stdout.strip():

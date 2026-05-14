@@ -39,6 +39,10 @@ class Config:
     azure_credentials_json: str
     azure_resource_group: str
     azure_aks_cluster: str
+    github_app_id: Optional[str] = None
+    github_app_installation_id: Optional[str] = None
+    github_app_private_key: Optional[str] = None
+    github_app_private_key_path: Optional[str] = None
     azure_deployments: List[str] = field(default_factory=list)
     deployment_health_check: bool = True
     deployment_log_tail_lines: int = 200
@@ -90,6 +94,21 @@ def load_config() -> Config:
     deployments = [d.strip() for d in deployments_raw.split(",") if d.strip()] if deployments_raw else []
 
     github_repo = os.environ["GITHUB_REPO"]
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    github_app_id = os.environ.get("GITHUB_APP_ID") or None
+    github_app_installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
+    github_app_private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
+    github_app_private_key_path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None
+
+    has_github_app_auth = bool(
+        github_app_id and github_app_installation_id and (github_app_private_key or github_app_private_key_path)
+    )
+    if not github_token and not has_github_app_auth:
+        raise KeyError(
+            "Set GITHUB_TOKEN or GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + "
+            "GITHUB_APP_PRIVATE_KEY[_PATH]."
+        )
+
     workspace_dir = os.environ.get(
         "BRAD_WORKSPACE_DIR",
         str(Path.home() / ".brad" / "workspaces"),
@@ -107,7 +126,7 @@ def load_config() -> Config:
         jira_user=os.environ["JIRA_USER"],
         jira_project_key=os.environ.get("JIRA_PROJECT_KEY", "DEV"),
 
-        github_token=os.environ["GITHUB_TOKEN"],
+        github_token=github_token,
         github_repo=github_repo,
 
         target_repo_path=target_repo_path,
@@ -127,6 +146,10 @@ def load_config() -> Config:
         azure_credentials_json=os.environ.get("AZURE_CREDENTIALS_JSON", ""),
         azure_resource_group=os.environ.get("AZURE_RESOURCE_GROUP", ""),
         azure_aks_cluster=os.environ.get("AZURE_AKS_CLUSTER", ""),
+        github_app_id=github_app_id,
+        github_app_installation_id=github_app_installation_id,
+        github_app_private_key=github_app_private_key,
+        github_app_private_key_path=github_app_private_key_path,
         azure_deployments=deployments,
         deployment_health_check=os.environ.get("DEPLOYMENT_HEALTH_CHECK", "true").lower() == "true",
         deployment_log_tail_lines=int(os.environ.get("DEPLOYMENT_LOG_TAIL_LINES", "200")),
@@ -175,6 +198,17 @@ def validate_config(cfg: Config) -> None:
         errors.append(f"Cannot create parent dir for target_repo_path {repo_path.parent}: {e}")
 
     Path(cfg.attachments_dir).mkdir(parents=True, exist_ok=True)
+
+    has_github_app_auth = bool(
+        cfg.github_app_id
+        and cfg.github_app_installation_id
+        and (cfg.github_app_private_key or cfg.github_app_private_key_path)
+    )
+    if not cfg.github_token and not has_github_app_auth:
+        errors.append(
+            "GitHub auth is missing. Set GITHUB_TOKEN or "
+            "GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY[_PATH]."
+        )
 
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))

@@ -69,6 +69,35 @@ def test_repo_manager_self_bootstraps_clone(tmp_path):
     )
 
 
+def test_repo_manager_refreshes_origin_before_network_git(tmp_path):
+    """Network git commands should refresh origin so GitHub App tokens can rotate."""
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    cfg = make_test_config(tmp_path)
+
+    with patch("brad.repo_manager.build_github_token_provider") as mock_build:
+        mock_provider = Mock()
+        mock_provider.is_configured.return_value = True
+        mock_provider.get_token.return_value = "fresh-token"
+        mock_provider.redact.side_effect = lambda value: value
+        mock_build.return_value = mock_provider
+
+        calls = []
+
+        def fake_run(cmd, capture_output, text):
+            calls.append(cmd)
+            if cmd[-3:] == ["remote", "get-url", "origin"]:
+                return Mock(returncode=0, stdout="https://x-access-token:old@github.com/owner/repo.git\n", stderr="")
+            return Mock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            repo = RepoManager(cfg)
+            repo._run_git("fetch", "origin")
+
+    flat = [" ".join(c) for c in calls]
+    assert any("remote set-url origin https://x-access-token:fresh-token@github.com/owner/repo.git" in c for c in flat)
+
+
 def test_run_git_success(repo_manager):
     """Test running a successful git command."""
     mock_result = Mock()
@@ -119,6 +148,7 @@ def test_checkout_branch_existing_syncs_with_remote(repo_manager):
     """Existing local branch should be hard-reset to origin/<branch> to avoid stale tips."""
     branch_list = _git_result("* main\n  DEV-123\n")
     checkout = _git_result()
+    remote_get_url = _git_result("https://x-access-token:gh-token@github.com/owner/repo.git\n")
     ls_remote = _git_result("abc123\trefs/heads/DEV-123\n")  # remote exists
     fetch = _git_result()
     reset = _git_result()
@@ -127,9 +157,16 @@ def test_checkout_branch_existing_syncs_with_remote(repo_manager):
 
     def fake_run(cmd, *a, **kw):
         calls.append(cmd)
-        # Order: branch, checkout -f, ls-remote (branch_exists_remote),
-        # fetch, reset --hard
-        return [branch_list, checkout, ls_remote, fetch, reset][len(calls) - 1]
+        # Order: branch, checkout -f, remote get-url, ls-remote, remote get-url, fetch, reset --hard
+        return [
+            branch_list,
+            checkout,
+            remote_get_url,
+            ls_remote,
+            remote_get_url,
+            fetch,
+            reset,
+        ][len(calls) - 1]
 
     with patch("subprocess.run", side_effect=fake_run):
         repo_manager.checkout_branch("DEV-123")
@@ -137,6 +174,7 @@ def test_checkout_branch_existing_syncs_with_remote(repo_manager):
     # Verify the sync happened
     flat = [" ".join(c) for c in calls]
     assert any("checkout -f DEV-123" in c for c in flat)
+    assert any("remote get-url origin" in c for c in flat)
     assert any("ls-remote --heads origin DEV-123" in c for c in flat)
     assert any("fetch origin DEV-123" in c for c in flat)
     assert any("reset --hard origin/DEV-123" in c for c in flat)
@@ -146,13 +184,14 @@ def test_checkout_branch_existing_skips_sync_when_no_remote(repo_manager):
     """Local-only branch should not attempt to fetch/reset against a missing remote ref."""
     branch_list = _git_result("* main\n  local-only\n")
     checkout = _git_result()
+    remote_get_url = _git_result("https://x-access-token:gh-token@github.com/owner/repo.git\n")
     ls_remote = _git_result("")  # remote does not exist
 
     calls = []
 
     def fake_run(cmd, *a, **kw):
         calls.append(cmd)
-        return [branch_list, checkout, ls_remote][len(calls) - 1]
+        return [branch_list, checkout, remote_get_url, ls_remote][len(calls) - 1]
 
     with patch("subprocess.run", side_effect=fake_run):
         repo_manager.checkout_branch("local-only")

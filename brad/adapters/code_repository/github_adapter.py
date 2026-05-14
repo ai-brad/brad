@@ -3,6 +3,7 @@ import time
 import requests
 from typing import List, Dict, Optional
 from brad.adapters.code_repository.base import CodeRepositoryAdapter
+from brad.github_auth import build_github_token_provider
 from brad.logging_config import get_logger
 from brad import db
 
@@ -12,16 +13,16 @@ class GitHubAdapter(CodeRepositoryAdapter):
 
     def __init__(self, cfg):
         self.logger = get_logger(__name__)
-        self.token = cfg.github_token
         self.repo = cfg.github_repo
+        self.github = build_github_token_provider(cfg)
         self.base_url = f"https://api.github.com/repos/{self.repo}"
-        self.headers = {
-            "Authorization": f"token {self.token}",
-            "Accept": "application/vnd.github+json",
-        }
         self._max_retries = 5
         self._base_wait = 5  # seconds
         self.logger.info(f"Initialized GitHub adapter for {self.repo}")
+
+    @property
+    def headers(self):
+        return self.github.get_headers()
 
     def _request_with_retry(self, method: str, url: str, **kwargs):
         """HTTP request with retry on transient network errors."""
@@ -416,8 +417,9 @@ class GitHubAdapter(CodeRepositoryAdapter):
         try:
             # The "List pull requests associated with a commit" endpoint is in
             # preview; the groot media type is required to enable it.
-            headers = dict(self.headers)
-            headers["Accept"] = "application/vnd.github.groot-preview+json"
+            headers = self.github.get_headers(
+                accept="application/vnd.github.groot-preview+json"
+            )
             resp = self._request_with_retry(
                 "get",
                 f"{self.base_url}/commits/{commit_sha}/pulls",

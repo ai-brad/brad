@@ -2,6 +2,7 @@
 import os
 from flask import Flask, render_template, jsonify
 from brad import db
+from brad.github_auth import build_github_token_provider_from_env
 from brad.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -109,11 +110,8 @@ def create_app(db_path: str = None) -> Flask:
         """Fetch live PR details from GitHub (reviews, checks, status)."""
         if not github_repo:
             return jsonify({"error": "GITHUB_REPO not configured"}), 500
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        if not github_token:
-            return jsonify({"error": "GITHUB_TOKEN not configured"}), 500
         try:
-            adapter = _get_github_adapter(github_token)
+            adapter = _get_github_adapter()
             details = adapter.get_pr_details(pr_number)
             return jsonify(details)
         except Exception as e:
@@ -125,11 +123,8 @@ def create_app(db_path: str = None) -> Flask:
         """Fetch review comments with their reply threads to show response status."""
         if not github_repo:
             return jsonify({"error": "GITHUB_REPO not configured"}), 500
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        if not github_token:
-            return jsonify({"error": "GITHUB_TOKEN not configured"}), 500
         try:
-            adapter = _get_github_adapter(github_token)
+            adapter = _get_github_adapter()
             comments = adapter.fetch_review_comments(pr_number)
             enriched = []
             for c in comments:
@@ -156,15 +151,26 @@ def create_app(db_path: str = None) -> Flask:
             logger.error(f"Failed to fetch comments for PR #{pr_number}: {e}")
             return jsonify({"error": str(e)}), 500
 
-    def _get_github_adapter(token):
+    def _get_github_adapter():
         from brad.adapters.code_repository.github_adapter import GitHubAdapter
 
         class _MiniCfg:
             pass
 
+        github_auth = build_github_token_provider_from_env()
+        if not github_auth.is_configured():
+            raise ValueError(
+                "GitHub auth is not configured. Set GITHUB_TOKEN or "
+                "GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY[_PATH]."
+            )
+
         cfg = _MiniCfg()
-        cfg.github_token = token
+        cfg.github_token = os.environ.get("GITHUB_TOKEN", "")
         cfg.github_repo = github_repo
+        cfg.github_app_id = os.environ.get("GITHUB_APP_ID") or None
+        cfg.github_app_installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
+        cfg.github_app_private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
+        cfg.github_app_private_key_path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None
         return GitHubAdapter(cfg)
 
     return app

@@ -3,6 +3,7 @@ import requests
 import time
 from typing import List, Dict, Optional
 from brad.adapters.ci_cd.base import CICDAdapter, CIResult, DeploymentInfo
+from brad.github_auth import build_github_token_provider
 from brad.logging_config import get_logger
 
 
@@ -11,14 +12,14 @@ class GitHubActionsAdapter(CICDAdapter):
 
     def __init__(self, cfg):
         self.logger = get_logger(__name__)
-        self.token = cfg.github_token
         self.repo = cfg.github_repo
+        self.github = build_github_token_provider(cfg)
         self.base_url = f"https://api.github.com/repos/{self.repo}"
-        self.headers = {
-            "Authorization": f"token {self.token}",
-            "Accept": "application/vnd.github+json",
-        }
         self.logger.info(f"Initialized GitHub Actions adapter for {self.repo}")
+
+    @property
+    def headers(self):
+        return self.github.get_headers()
 
     # -------------------------
     # Environment resolution

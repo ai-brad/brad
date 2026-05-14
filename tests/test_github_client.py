@@ -23,6 +23,29 @@ def test_github_client_initialization(github_client):
     assert github_client.repo == "owner/repo"
 
 
+def test_github_client_uses_bearer_for_github_app(tmp_path):
+    """GitHub App installation tokens should use Bearer auth for REST calls."""
+    cfg = make_test_config(
+        tmp_path,
+        github_token="",
+        github_app_id="123",
+        github_app_installation_id="456",
+        github_app_private_key="-----BEGIN PRIVATE KEY-----\\ntest\\n-----END PRIVATE KEY-----\\n",
+    )
+
+    with patch("brad.adapters.code_repository.github_adapter.build_github_token_provider") as mock_build:
+        provider = Mock()
+        provider.get_headers.return_value = {
+            "Authorization": "Bearer installation-token",
+            "Accept": "application/vnd.github+json",
+        }
+        mock_build.return_value = provider
+
+        client = GitHubAdapter(cfg)
+
+    assert client.headers["Authorization"] == "Bearer installation-token"
+
+
 def test_open_pr_success(github_client):
     """Test opening a PR successfully."""
     mock_response = Mock()

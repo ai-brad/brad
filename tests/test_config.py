@@ -68,6 +68,29 @@ def test_load_config_with_custom_values(monkeypatch):
     assert cfg.log_level == "DEBUG"
 
 
+def test_load_config_accepts_github_app_auth_without_pat(monkeypatch, tmp_path):
+    """GitHub App credentials should satisfy config loading without GITHUB_TOKEN."""
+    key_path = tmp_path / "app.pem"
+    key_path.write_text("-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n")
+
+    monkeypatch.setenv("JIRA_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_TOKEN", "test-token")
+    monkeypatch.setenv("JIRA_USER", "test@example.com")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+    monkeypatch.setenv("TARGET_REPO_PATH", "/fake/repo")
+    monkeypatch.setenv("GITHUB_APP_ID", "123")
+    monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "456")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_PATH", str(key_path))
+
+    cfg = load_config()
+
+    assert cfg.github_token == ""
+    assert cfg.github_app_id == "123"
+    assert cfg.github_app_installation_id == "456"
+    assert cfg.github_app_private_key_path == str(key_path)
+
+
 def test_validate_config_missing_repo_path_is_ok(tmp_path):
     """Missing target_repo_path is now fine: RepoManager self-bootstraps via clone."""
     # Parent must be writable; point at tmp_path/not-yet-cloned which doesn't exist

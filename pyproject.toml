@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3.0.0",
+    "PyJWT>=2.9.0",
+    "cryptography>=42.0.0",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
 ]

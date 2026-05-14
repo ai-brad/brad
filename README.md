@@ -117,8 +117,10 @@ cp .env.example .env
 
 **Required Settings:**
 - **Jira**: `JIRA_URL`, `JIRA_USER`, `JIRA_TOKEN` - [Get Jira API token](https://id.atlassian.com/manage-profile/security/api-tokens)
-- **GitHub**: `GITHUB_TOKEN`, `GITHUB_REPO` - [Create GitHub token](https://github.com/settings/tokens/new) (needs `repo` and `workflow` scopes)
-- **Repository**: `TARGET_REPO_PATH` *(optional)* - Absolute path to an existing local clone of `GITHUB_REPO`. If unset, Brad self-bootstraps a clone under `BRAD_WORKSPACE_DIR` (default `~/.brad/workspaces`) using HTTPS + `GITHUB_TOKEN`.
+- **GitHub**: `GITHUB_REPO` plus either:
+  - `GITHUB_TOKEN` - classic PAT / fine-grained token with repo access
+  - `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` or `GITHUB_APP_PRIVATE_KEY_PATH` - preferred for long-lived bot auth
+- **Repository**: `TARGET_REPO_PATH` *(optional)* - Absolute path to an existing local clone of `GITHUB_REPO`. If unset, Brad self-bootstraps a clone under `BRAD_WORKSPACE_DIR` (default `~/.brad/workspaces`) using HTTPS and the configured GitHub auth mode.
 - **Azure OpenAI**: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL` - [Azure OpenAI setup](https://learn.microsoft.com/en-us/azure/ai-services/openai/quickstart)
 
 **Optional Settings:**
