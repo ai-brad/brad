@@ -127,6 +127,11 @@ cp .env.example .env
 - **Cost Tracking**: `LLM_COST_PER_1K_PROMPT_TOKENS`, `LLM_COST_PER_1K_COMPLETION_TOKENS`
 - **Safety Limits**: `MAX_CI_FIX_ITERATIONS`, `MAX_REVIEW_FIX_ITERATIONS`
 - **Azure AKS**: For deployment monitoring (can be left empty)
+- **Execution Liveness**:
+  - `EXECUTION_HEARTBEAT_INTERVAL_SECONDS` (default `30`)
+  - `EXECUTION_STALE_THRESHOLD_SECONDS` (default `300`)
+  - `EXECUTION_MEMORY_LOG_INTERVAL_SECONDS` (default `300`)
+  - `BRAD_ALLOW_CONCURRENT_WORKERS` (default `false`; current design assumes one worker)
 
 See `.env.example` for detailed instructions on each setting.
 
@@ -151,6 +156,12 @@ chmod 700 ~/.brad/hooks/provision-target.sh
 # In brad's .env:
 TARGET_REPO_PROVISION_HOOK=/home/you/.brad/hooks/provision-target.sh
 ```
+
+### Execution liveness and stale-state recovery
+
+Brad keeps execution liveness state in the database so the GUI can avoid showing
+phantom `running` work forever after a worker interruption. See
+`docs/execution_liveness.md` for the reasoning and failure-mode breakdown.
 
 Keep `~/.brad/secrets/` (or wherever you store the secrets file) outside of any git repository. The hook itself must also never be committed. If the hook exits non-zero, Brad logs the error but does not abort — an already-provisioned workspace still works.
 

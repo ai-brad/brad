@@ -10,6 +10,7 @@ import time
 import argparse
 from dotenv import load_dotenv
 from brad.config import load_config, validate_config
+from brad.execution_liveness import ExecutionLivenessTracker
 from brad.logging_config import setup_logging, get_logger
 from brad.orchestrator import BradOrchestrator
 from brad import db
@@ -19,6 +20,7 @@ STALE_EXECUTION_MESSAGE = "Worker restarted during execution"
 
 
 def main():
+    liveness = None
     parser = argparse.ArgumentParser(
         description="Brad - Autonomous AI Software Engineer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -88,12 +90,20 @@ Examples:
         # Initialize database
         db.init_db(cfg.db_path)
         logger.info(f"Database initialized at {cfg.db_path}")
-        reconciled = db.reconcile_running_executions(STALE_EXECUTION_MESSAGE)
+        liveness = ExecutionLivenessTracker.from_env()
+        db.set_execution_runtime_observer(liveness)
+        reconciled = db.reconcile_running_executions(
+            STALE_EXECUTION_MESSAGE,
+            stale_after_seconds=int(os.environ.get("EXECUTION_STALE_THRESHOLD_SECONDS", "300")),
+            current_worker_id=liveness.worker_id,
+            assume_single_worker=os.environ.get("BRAD_ALLOW_CONCURRENT_WORKERS", "false").lower() == "false",
+        )
         if reconciled:
             logger.warning(
                 "Marked %d stale running execution(s) as failed during startup",
                 reconciled,
             )
+        liveness.install_signal_handlers()
 
     except Exception as e:
         print(f"Configuration error: {e}", file=sys.stderr)
@@ -105,6 +115,8 @@ Examples:
     except Exception as e:
         logger = get_logger(__name__)
         logger.error(f"Failed to initialize Brad: {e}", exc_info=True)
+        if liveness is not None:
+            liveness.close()
         sys.exit(1)
 
     # Execute command
@@ -126,12 +138,24 @@ Examples:
                 orchestrator.run_once()
 
         logger.info("Brad completed successfully")
+        if liveness is not None:
+            liveness.close()
 
     except KeyboardInterrupt:
         logger.info("Brad interrupted by user")
+        if liveness is not None:
+            try:
+                liveness.close()
+            except Exception:
+                pass
         sys.exit(0)
     except Exception as e:
         logger.error(f"Brad failed with error: {e}", exc_info=True)
+        if liveness is not None:
+            try:
+                liveness.close()
+            except Exception:
+                pass
         sys.exit(1)
 
 

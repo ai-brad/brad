@@ -13,6 +13,7 @@ logger = get_logger(__name__)
 
 _DB_PATH = None
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+_EXECUTION_RUNTIME_OBSERVER = None
 
 
 def init_db(db_path: str = "brad_data.db") -> None:
@@ -73,50 +74,127 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def set_execution_runtime_observer(observer) -> None:
+    """Register a worker-local execution observer for liveness tracking."""
+    global _EXECUTION_RUNTIME_OBSERVER
+    _EXECUTION_RUNTIME_OBSERVER = observer
+
+
+def _notify_execution_observer(method_name: str, *args) -> None:
+    observer = _EXECUTION_RUNTIME_OBSERVER
+    if not observer:
+        return
+    method = getattr(observer, method_name, None)
+    if not method:
+        return
+    try:
+        method(*args)
+    except Exception as exc:
+        logger.warning("Execution runtime observer %s failed: %s", method_name, exc)
+
+
 # -------------------------
 # Executions
 # -------------------------
 
 def create_execution(issue_key: str, summary: str = "") -> int:
     """Create a new execution record. Returns the execution ID."""
+    created_at = _now()
     with _get_conn() as conn:
         cursor = conn.execute(
-            "INSERT INTO executions (issue_key, summary, started_at, status) VALUES (?, ?, ?, ?)",
-            (issue_key, summary, _now(), "running"),
+            """
+            INSERT INTO executions (
+                issue_key, summary, started_at, status, last_progress_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (issue_key, summary, created_at, "running", created_at),
         )
         exec_id = cursor.lastrowid
-        logger.info(f"Created execution #{exec_id} for {issue_key}")
-        return exec_id
+    logger.info(f"Created execution #{exec_id} for {issue_key}")
+    _notify_execution_observer("on_execution_created", exec_id, issue_key)
+    return exec_id
 
 
 def finish_execution(execution_id: int, status: str = "completed", pr_number: Optional[int] = None, pr_url: Optional[str] = None, error_message: Optional[str] = None) -> None:
     """Mark an execution as finished."""
+    finished_at = _now()
     with _get_conn() as conn:
         conn.execute(
-            "UPDATE executions SET finished_at=?, status=?, pr_number=?, pr_url=?, error_message=? WHERE id=?",
-            (_now(), status, pr_number, pr_url, error_message, execution_id),
+            """
+            UPDATE executions
+               SET finished_at=?,
+                   status=?,
+                   pr_number=?,
+                   pr_url=?,
+                   error_message=?,
+                   last_progress_at=COALESCE(?, last_progress_at),
+                   last_heartbeat_at=COALESCE(last_heartbeat_at, ?)
+             WHERE id=?
+            """,
+            (finished_at, status, pr_number, pr_url, error_message, finished_at, finished_at, execution_id),
         )
     logger.info(f"Execution #{execution_id} finished: {status}")
+    _notify_execution_observer("on_execution_finished", execution_id, status, error_message)
 
 
 def reconcile_running_executions(
     error_message: str = "Worker restarted during execution",
+    stale_after_seconds: int = 300,
+    current_worker_id: Optional[str] = None,
+    assume_single_worker: bool = True,
 ) -> int:
     """Mark any stale running executions/steps as failed.
 
     This should only be called by the worker process during startup. The GUI also
     initializes the database and must not mutate execution state.
     """
+    stale_after_seconds = max(1, int(stale_after_seconds))
+    now = datetime.now(timezone.utc)
+    stale_ids = []
+
     with _get_conn() as conn:
         running = conn.execute(
-            "SELECT id FROM executions WHERE status = 'running'"
+            """
+            SELECT id, issue_key, started_at, last_progress_at, last_heartbeat_at, worker_id
+              FROM executions
+             WHERE status = 'running'
+            """
         ).fetchall()
         if not running:
             return 0
 
-        execution_ids = [row["id"] for row in running]
+        for row in running:
+            freshness = (
+                _parse_timestamp(row["last_heartbeat_at"])
+                or _parse_timestamp(row["last_progress_at"])
+                or _parse_timestamp(row["started_at"])
+            )
+            age_seconds = (now - freshness).total_seconds() if freshness else float("inf")
+            owned_by_other_worker = (
+                assume_single_worker
+                and current_worker_id is not None
+                and row["worker_id"] is not None
+                and row["worker_id"] != current_worker_id
+            )
+            legacy_unowned = assume_single_worker and row["worker_id"] is None
+
+            if owned_by_other_worker or legacy_unowned or age_seconds > stale_after_seconds:
+                stale_ids.append(row["id"])
+
+        if not stale_ids:
+            return 0
+
         finished_at = _now()
-        placeholders = ",".join("?" for _ in execution_ids)
+        placeholders = ",".join("?" for _ in stale_ids)
 
         conn.execute(
             f"""
@@ -124,6 +202,8 @@ def reconcile_running_executions(
                SET status = 'failed',
                    finished_at = COALESCE(finished_at, ?),
                    error_message = COALESCE(error_message, ?),
+                   last_progress_at = COALESCE(last_progress_at, ?),
+                   last_heartbeat_at = COALESCE(last_heartbeat_at, ?),
                    current_phase_detail = CASE
                        WHEN current_phase_detail IS NULL OR current_phase_detail = ''
                        THEN ?
@@ -131,7 +211,7 @@ def reconcile_running_executions(
                    END
              WHERE id IN ({placeholders})
             """,
-            (finished_at, error_message, error_message, *execution_ids),
+            (finished_at, error_message, finished_at, finished_at, error_message, *stale_ids),
         )
         conn.execute(
             f"""
@@ -142,46 +222,102 @@ def reconcile_running_executions(
              WHERE execution_id IN ({placeholders})
                AND status = 'running'
             """,
-            (finished_at, error_message, *execution_ids),
+            (finished_at, error_message, *stale_ids),
         )
 
     logger.warning(
         "Reconciled %d stale running execution(s) on startup: %s",
-        len(execution_ids),
-        execution_ids,
+        len(stale_ids),
+        stale_ids,
     )
-    return len(execution_ids)
+    return len(stale_ids)
 
 
 def update_execution_costs(execution_id: int, prompt_tokens: int, completion_tokens: int, cost: float) -> None:
     """Add token usage and cost to an execution's totals."""
+    now = _now()
     with _get_conn() as conn:
         conn.execute(
             """UPDATE executions
                SET total_prompt_tokens = total_prompt_tokens + ?,
                    total_completion_tokens = total_completion_tokens + ?,
-                   total_cost = total_cost + ?
+                   total_cost = total_cost + ?,
+                   last_progress_at = ?
                WHERE id = ?""",
-            (prompt_tokens, completion_tokens, cost, execution_id),
+            (prompt_tokens, completion_tokens, cost, now, execution_id),
         )
 
 
 def update_execution_pr(execution_id: int, pr_number: int, pr_url: str) -> None:
     """Update PR info on an execution as soon as the PR is created."""
+    now = _now()
     with _get_conn() as conn:
         conn.execute(
-            "UPDATE executions SET pr_number=?, pr_url=? WHERE id=?",
-            (pr_number, pr_url, execution_id),
+            "UPDATE executions SET pr_number=?, pr_url=?, last_progress_at=? WHERE id=?",
+            (pr_number, pr_url, now, execution_id),
         )
     logger.info(f"Execution #{execution_id} linked to PR #{pr_number}")
 
 
 def update_execution_phase(execution_id: int, phase: str, detail: str = "") -> None:
     """Update the current phase and detail for live dashboard display."""
+    now = _now()
     with _get_conn() as conn:
         conn.execute(
-            "UPDATE executions SET current_phase=?, current_phase_detail=? WHERE id=?",
-            (phase, detail[:500] if detail else "", execution_id),
+            """
+            UPDATE executions
+               SET current_phase=?,
+                   current_phase_detail=?,
+                   last_progress_at=?
+             WHERE id=?
+            """,
+            (phase, detail[:500] if detail else "", now, execution_id),
+        )
+    _notify_execution_observer("on_execution_phase_changed", execution_id, phase, detail)
+
+
+def touch_execution_liveness(
+    execution_id: int,
+    *,
+    worker_id: Optional[str] = None,
+    worker_pid: Optional[int] = None,
+    current_memory_rss_bytes: Optional[int] = None,
+    peak_memory_rss_bytes: Optional[int] = None,
+    progress: bool = False,
+) -> None:
+    """Update heartbeat/ownership/memory fields on a running execution."""
+    now = _now()
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE executions
+               SET worker_id = COALESCE(?, worker_id),
+                   worker_pid = COALESCE(?, worker_pid),
+                   last_heartbeat_at = ?,
+                   last_progress_at = CASE WHEN ? THEN ? ELSE last_progress_at END,
+                   last_memory_rss_bytes = COALESCE(?, last_memory_rss_bytes),
+                   peak_memory_rss_bytes = CASE
+                       WHEN ? IS NULL THEN peak_memory_rss_bytes
+                       WHEN peak_memory_rss_bytes IS NULL THEN ?
+                       WHEN ? > peak_memory_rss_bytes THEN ?
+                       ELSE peak_memory_rss_bytes
+                   END
+             WHERE id = ?
+               AND status = 'running'
+            """,
+            (
+                worker_id,
+                worker_pid,
+                now,
+                1 if progress else 0,
+                now,
+                current_memory_rss_bytes,
+                peak_memory_rss_bytes,
+                peak_memory_rss_bytes,
+                peak_memory_rss_bytes,
+                peak_memory_rss_bytes,
+                execution_id,
+            ),
         )
 
 
@@ -210,10 +346,15 @@ def get_latest_execution_for_issue(issue_key: str) -> Optional[Dict]:
 
 def create_step(execution_id: int, phase: str, detail: str = "", iteration: int = 0) -> int:
     """Create a new step within an execution. Returns the step ID."""
+    started_at = _now()
     with _get_conn() as conn:
         cursor = conn.execute(
             "INSERT INTO steps (execution_id, phase, started_at, status, detail, iteration) VALUES (?, ?, ?, ?, ?, ?)",
-            (execution_id, phase, _now(), "running", detail[:500] if detail else "", iteration),
+            (execution_id, phase, started_at, "running", detail[:500] if detail else "", iteration),
+        )
+        conn.execute(
+            "UPDATE executions SET last_progress_at=? WHERE id=?",
+            (started_at, execution_id),
         )
         step_id = cursor.lastrowid
         logger.debug(f"Created step #{step_id} ({phase}) for execution #{execution_id}")
@@ -222,10 +363,19 @@ def create_step(execution_id: int, phase: str, detail: str = "", iteration: int 
 
 def finish_step(step_id: int, status: str = "completed", prompt_tokens: int = 0, completion_tokens: int = 0, cost: float = 0.0, result_summary: Optional[str] = None) -> None:
     """Mark a step as finished with usage stats."""
+    finished_at = _now()
     with _get_conn() as conn:
         conn.execute(
             "UPDATE steps SET finished_at=?, status=?, prompt_tokens=?, completion_tokens=?, cost=?, result_summary=? WHERE id=?",
-            (_now(), status, prompt_tokens, completion_tokens, cost, result_summary, step_id),
+            (finished_at, status, prompt_tokens, completion_tokens, cost, result_summary, step_id),
+        )
+        conn.execute(
+            """
+            UPDATE executions
+               SET last_progress_at=?
+             WHERE id = (SELECT execution_id FROM steps WHERE id = ?)
+            """,
+            (finished_at, step_id),
         )
 
 
@@ -244,10 +394,15 @@ def update_step_detail(step_id: int, detail: str) -> None:
 
 def record_ci_run(execution_id: int, run_id: Optional[int], workflow_name: str, conclusion: str, logs_summary: Optional[str] = None) -> int:
     """Record a CI/CD run result."""
+    checked_at = _now()
     with _get_conn() as conn:
         cursor = conn.execute(
             "INSERT INTO ci_runs (execution_id, run_id, workflow_name, conclusion, logs_summary, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (execution_id, run_id, workflow_name, conclusion, logs_summary, _now()),
+            (execution_id, run_id, workflow_name, conclusion, logs_summary, checked_at),
+        )
+        conn.execute(
+            "UPDATE executions SET last_progress_at=? WHERE id=?",
+            (checked_at, execution_id),
         )
         return cursor.lastrowid
 
@@ -320,13 +475,26 @@ def get_total_costs() -> Dict:
         return dict(row) if row else {}
 
 
-def get_running_execution() -> Optional[Dict]:
-    """Get the currently running execution, if any."""
+def get_running_execution(stale_after_seconds: int = 300) -> Optional[Dict]:
+    """Get the freshest currently-running execution, excluding stale rows."""
+    stale_after_seconds = max(1, int(stale_after_seconds))
+    now = datetime.now(timezone.utc)
     with _get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM executions WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
-        ).fetchone()
-        return dict(row) if row else None
+        rows = conn.execute(
+            "SELECT * FROM executions WHERE status = 'running' ORDER BY started_at DESC",
+        ).fetchall()
+        for row in rows:
+            data = dict(row)
+            freshness = (
+                _parse_timestamp(data.get("last_heartbeat_at"))
+                or _parse_timestamp(data.get("last_progress_at"))
+                or _parse_timestamp(data.get("started_at"))
+            )
+            if not freshness:
+                continue
+            if (now - freshness).total_seconds() <= stale_after_seconds:
+                return data
+        return None
 
 
 def has_ongoing_work_for_pr(pr_number: int) -> bool:

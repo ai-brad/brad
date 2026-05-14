@@ -154,6 +154,37 @@ class TestDatabaseIntegration:
         assert latest_steps[0]["id"] == latest_step_id
         assert latest_steps[0]["status"] == "failed"
         assert latest_steps[0]["result_summary"] == "Worker restarted during execution"
+
+    def test_reconcile_running_executions_marks_legacy_unowned_rows_immediately(self, temp_db):
+        """Single-worker startup should fail legacy running rows even without heartbeat fields."""
+        exec_id = db.create_execution("TEST-LEGACY", "Legacy stale run")
+        db.update_execution_phase(exec_id, "implementing", "Writing code and tests")
+
+        # Simulate old schema/runtime that never wrote worker ownership or heartbeat fields.
+        import sqlite3
+        with sqlite3.connect(temp_db) as conn:
+            conn.execute(
+                """
+                UPDATE executions
+                   SET worker_id = NULL,
+                       worker_pid = NULL,
+                       last_heartbeat_at = NULL
+                 WHERE id = ?
+                """,
+                (exec_id,),
+            )
+
+        reconciled = db.reconcile_running_executions(
+            "Worker restarted during execution",
+            stale_after_seconds=3600,
+            current_worker_id="new-worker",
+            assume_single_worker=True,
+        )
+
+        execution = db.get_execution(exec_id)
+        assert reconciled == 1
+        assert execution["status"] == "failed"
+        assert execution["error_message"] == "Worker restarted during execution"
     
     def test_repo_metadata_caching(self, temp_db):
         """Test repository metadata caching."""
