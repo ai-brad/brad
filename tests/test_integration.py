@@ -112,6 +112,48 @@ class TestDatabaseIntegration:
         assert steps[0]["status"] == "failed"
         assert steps[0]["finished_at"] is not None
         assert steps[0]["result_summary"] == "Worker restarted during execution"
+
+    def test_reconcile_running_executions_clears_phantom_dashboard_state(self, temp_db):
+        """A worker restart should recover stale runs and clear dashboard state."""
+        completed_id = db.create_execution("TEST-DONE", "Already completed")
+        db.update_execution_phase(completed_id, "done", "Finished successfully")
+        db.finish_execution(completed_id, status="completed")
+
+        stale_old_id = db.create_execution("TEST-OLD", "Older stale run")
+        db.update_execution_phase(stale_old_id, "ci_fix", "Fixing CI failures")
+        db.create_step(stale_old_id, "ci_fix", "Re-running failed CI jobs", iteration=1)
+
+        stale_latest_id = db.create_execution("TEST-LATEST", "Newest stale run")
+        db.update_execution_phase(stale_latest_id, "implementing", "Writing code and tests")
+        latest_step_id = db.create_step(
+            stale_latest_id,
+            "implementation",
+            "Running LLM implementation agent",
+        )
+
+        assert db.get_running_execution()["id"] == stale_latest_id
+
+        reconciled = db.reconcile_running_executions("Worker restarted during execution")
+
+        assert reconciled == 2
+        assert db.get_running_execution() is None
+
+        latest = db.get_execution(stale_latest_id)
+        assert latest["status"] == "failed"
+        assert latest["error_message"] == "Worker restarted during execution"
+
+        old = db.get_execution(stale_old_id)
+        assert old["status"] == "failed"
+        assert old["error_message"] == "Worker restarted during execution"
+
+        completed = db.get_execution(completed_id)
+        assert completed["status"] == "completed"
+        assert completed["error_message"] is None
+
+        latest_steps = db.get_execution_steps(stale_latest_id)
+        assert latest_steps[0]["id"] == latest_step_id
+        assert latest_steps[0]["status"] == "failed"
+        assert latest_steps[0]["result_summary"] == "Worker restarted during execution"
     
     def test_repo_metadata_caching(self, temp_db):
         """Test repository metadata caching."""
