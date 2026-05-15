@@ -233,18 +233,25 @@ def reconcile_running_executions(
     return len(stale_ids)
 
 
-def update_execution_costs(execution_id: int, prompt_tokens: int, completion_tokens: int, cost: float) -> None:
+def update_execution_costs(
+    execution_id: int,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cost: float,
+    cached_prompt_tokens: int = 0,
+) -> None:
     """Add token usage and cost to an execution's totals."""
     now = _now()
     with _get_conn() as conn:
         conn.execute(
             """UPDATE executions
                SET total_prompt_tokens = total_prompt_tokens + ?,
+                   total_cached_prompt_tokens = total_cached_prompt_tokens + ?,
                    total_completion_tokens = total_completion_tokens + ?,
                    total_cost = total_cost + ?,
                    last_progress_at = ?
                WHERE id = ?""",
-            (prompt_tokens, completion_tokens, cost, now, execution_id),
+            (prompt_tokens, cached_prompt_tokens, completion_tokens, cost, now, execution_id),
         )
 
 
@@ -361,13 +368,21 @@ def create_step(execution_id: int, phase: str, detail: str = "", iteration: int 
         return step_id
 
 
-def finish_step(step_id: int, status: str = "completed", prompt_tokens: int = 0, completion_tokens: int = 0, cost: float = 0.0, result_summary: Optional[str] = None) -> None:
+def finish_step(
+    step_id: int,
+    status: str = "completed",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cost: float = 0.0,
+    result_summary: Optional[str] = None,
+    cached_prompt_tokens: int = 0,
+) -> None:
     """Mark a step as finished with usage stats."""
     finished_at = _now()
     with _get_conn() as conn:
         conn.execute(
-            "UPDATE steps SET finished_at=?, status=?, prompt_tokens=?, completion_tokens=?, cost=?, result_summary=? WHERE id=?",
-            (finished_at, status, prompt_tokens, completion_tokens, cost, result_summary, step_id),
+            "UPDATE steps SET finished_at=?, status=?, prompt_tokens=?, cached_prompt_tokens=?, completion_tokens=?, cost=?, result_summary=? WHERE id=?",
+            (finished_at, status, prompt_tokens, cached_prompt_tokens, completion_tokens, cost, result_summary, step_id),
         )
         conn.execute(
             """
@@ -468,6 +483,7 @@ def get_total_costs() -> Dict:
             """SELECT
                 COUNT(*) as total_executions,
                 SUM(total_prompt_tokens) as total_prompt_tokens,
+                SUM(total_cached_prompt_tokens) as total_cached_prompt_tokens,
                 SUM(total_completion_tokens) as total_completion_tokens,
                 SUM(total_cost) as total_cost
             FROM executions"""
@@ -606,17 +622,17 @@ def filter_unprocessed_comments(
 # -------------------------
 
 _DEFAULT_MODEL_COSTS = [
-    ("gpt-4o",          0.0025,  0.0100, "default"),
-    ("gpt-4o-mini",     0.00015, 0.0006, "default"),
-    ("gpt-4.1",         0.002,   0.008,  "default"),
-    ("gpt-4.1-mini",    0.0004, 0.0016, "default"),
-    ("gpt-4.1-nano",    0.0001, 0.0004, "default"),
-    ("o3",              0.002,   0.008,  "default"),
-    ("o3-mini",         0.0011, 0.0044, "default"),
-    ("o4-mini",         0.0011, 0.0044, "default"),
-    ("gpt-5.2-codex",   0.003,   0.012,  "default"),
-    ("gpt-5-codex",     0.00125, 0.0100, "default"),
-    ("gpt-5.4",         0.005,   0.020,  "default"),
+    ("gpt-4o",          0.0025,  None,     0.0100, "default"),
+    ("gpt-4o-mini",     0.00015, None,     0.0006, "default"),
+    ("gpt-4.1",         0.002,   None,     0.008,  "default"),
+    ("gpt-4.1-mini",    0.0004,  None,     0.0016, "default"),
+    ("gpt-4.1-nano",    0.0001,  None,     0.0004, "default"),
+    ("o3",              0.002,   None,     0.008,  "default"),
+    ("o3-mini",         0.0011,  None,     0.0044, "default"),
+    ("o4-mini",         0.0011,  None,     0.0044, "default"),
+    ("gpt-5.2-codex",   0.003,   None,     0.012,  "default"),
+    ("gpt-5-codex",     0.00125, None,     0.0100, "default"),
+    ("gpt-5.4",         0.0025,  0.00025, 0.015,   "default"),
 ]
 
 _COST_TTL_HOURS = 24
@@ -627,52 +643,71 @@ def _seed_default_model_costs(conn):
     now = _now()
     from datetime import timedelta
     expires = (datetime.now(timezone.utc) + timedelta(hours=_COST_TTL_HOURS)).isoformat()
-    for pattern, prompt_cost, completion_cost, source in _DEFAULT_MODEL_COSTS:
+    for pattern, prompt_cost, cached_prompt_cost, completion_cost, source in _DEFAULT_MODEL_COSTS:
         conn.execute(
-            "INSERT OR IGNORE INTO model_costs (model_pattern, prompt_cost_per_1k, completion_cost_per_1k, updated_at, expires_at, source) VALUES (?, ?, ?, ?, ?, ?)",
-            (pattern, prompt_cost, completion_cost, now, expires, source),
+            "INSERT OR IGNORE INTO model_costs (model_pattern, prompt_cost_per_1k, cached_prompt_cost_per_1k, completion_cost_per_1k, updated_at, expires_at, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (pattern, prompt_cost, cached_prompt_cost, completion_cost, now, expires, source),
         )
 
 
 def get_model_cost(model_name: str) -> Dict:
-    """Get per-1k-token costs for a model. Returns {'prompt': float, 'completion': float}.
+    """Get per-1k-token costs for a model.
+
+    Returns {'prompt': float, 'cached_prompt': float, 'completion': float}.
     Falls back to best-match pattern, then zero."""
     with _get_conn() as conn:
         # Exact match first
         row = conn.execute(
-            "SELECT prompt_cost_per_1k, completion_cost_per_1k, expires_at FROM model_costs WHERE model_pattern = ?",
+            "SELECT prompt_cost_per_1k, cached_prompt_cost_per_1k, completion_cost_per_1k, expires_at FROM model_costs WHERE model_pattern = ?",
             (model_name,),
         ).fetchone()
         if row:
-            return {"prompt": row["prompt_cost_per_1k"], "completion": row["completion_cost_per_1k"]}
+            cached_prompt = row["cached_prompt_cost_per_1k"]
+            return {
+                "prompt": row["prompt_cost_per_1k"],
+                "cached_prompt": cached_prompt if cached_prompt is not None else row["prompt_cost_per_1k"] * 0.5,
+                "completion": row["completion_cost_per_1k"],
+            }
 
         # Prefix match (e.g. 'gpt-4o' matches 'gpt-4o-2024-11-20')
         rows = conn.execute(
-            "SELECT model_pattern, prompt_cost_per_1k, completion_cost_per_1k FROM model_costs ORDER BY LENGTH(model_pattern) DESC"
+            "SELECT model_pattern, prompt_cost_per_1k, cached_prompt_cost_per_1k, completion_cost_per_1k FROM model_costs ORDER BY LENGTH(model_pattern) DESC"
         ).fetchall()
         for r in rows:
             if model_name.startswith(r["model_pattern"]):
-                return {"prompt": r["prompt_cost_per_1k"], "completion": r["completion_cost_per_1k"]}
+                cached_prompt = r["cached_prompt_cost_per_1k"]
+                return {
+                    "prompt": r["prompt_cost_per_1k"],
+                    "cached_prompt": cached_prompt if cached_prompt is not None else r["prompt_cost_per_1k"] * 0.5,
+                    "completion": r["completion_cost_per_1k"],
+                }
 
-    return {"prompt": 0.0, "completion": 0.0}
+    return {"prompt": 0.0, "cached_prompt": 0.0, "completion": 0.0}
 
 
-def upsert_model_cost(model_pattern: str, prompt_cost_per_1k: float, completion_cost_per_1k: float, source: str = "manual") -> None:
+def upsert_model_cost(
+    model_pattern: str,
+    prompt_cost_per_1k: float,
+    completion_cost_per_1k: float,
+    source: str = "manual",
+    cached_prompt_cost_per_1k: Optional[float] = None,
+) -> None:
     """Insert or update a model cost entry, resetting TTL."""
     from datetime import timedelta
     now = _now()
     expires = (datetime.now(timezone.utc) + timedelta(hours=_COST_TTL_HOURS)).isoformat()
     with _get_conn() as conn:
         conn.execute(
-            """INSERT INTO model_costs (model_pattern, prompt_cost_per_1k, completion_cost_per_1k, updated_at, expires_at, source)
-               VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO model_costs (model_pattern, prompt_cost_per_1k, cached_prompt_cost_per_1k, completion_cost_per_1k, updated_at, expires_at, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(model_pattern) DO UPDATE SET
                    prompt_cost_per_1k=excluded.prompt_cost_per_1k,
+                   cached_prompt_cost_per_1k=excluded.cached_prompt_cost_per_1k,
                    completion_cost_per_1k=excluded.completion_cost_per_1k,
                    updated_at=excluded.updated_at,
                    expires_at=excluded.expires_at,
                    source=excluded.source""",
-            (model_pattern, prompt_cost_per_1k, completion_cost_per_1k, now, expires, source),
+            (model_pattern, prompt_cost_per_1k, cached_prompt_cost_per_1k, completion_cost_per_1k, now, expires, source),
         )
 
 

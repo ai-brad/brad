@@ -38,7 +38,11 @@
     </div>
     <div class="stat-card">
         <div class="stat-value" id="stat-prompt-tokens">{{ "{:,}".format(totals.total_prompt_tokens or 0) }}</div>
-        <div class="stat-label">Prompt Tokens</div>
+        <div class="stat-label">Input Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-cached-prompt-tokens">{{ "{:,}".format(totals.total_cached_prompt_tokens or 0) }}</div>
+        <div class="stat-label">Cached Input</div>
     </div>
     <div class="stat-card">
         <div class="stat-value" id="stat-completion-tokens">{{ "{:,}".format(totals.total_completion_tokens or 0) }}</div>
@@ -121,6 +125,7 @@ function refreshDashboard() {
             // Update stats
             document.getElementById('stat-executions').textContent = fmtNum(data.totals.total_executions);
             document.getElementById('stat-prompt-tokens').textContent = fmtNum(data.totals.total_prompt_tokens);
+            document.getElementById('stat-cached-prompt-tokens').textContent = fmtNum(data.totals.total_cached_prompt_tokens);
             document.getElementById('stat-completion-tokens').textContent = fmtNum(data.totals.total_completion_tokens);
             document.getElementById('stat-cost').textContent = fmtCost(data.totals.total_cost);
 

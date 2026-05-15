@@ -30,7 +30,11 @@
     <div class="stats-grid" id="d-stats">
         <div class="stat-card">
             <div class="stat-value" id="d-prompt">{{ "{:,}".format(execution.total_prompt_tokens or 0) }}</div>
-            <div class="stat-label">Prompt Tokens</div>
+            <div class="stat-label">Input Tokens</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="d-cached-prompt">{{ "{:,}".format(execution.total_cached_prompt_tokens or 0) }}</div>
+            <div class="stat-label">Cached Input</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="d-completion">{{ "{:,}".format(execution.total_completion_tokens or 0) }}</div>
@@ -321,6 +325,7 @@ function refreshAll() {
 
             // Update costs
             document.getElementById('d-prompt').textContent = fmtNum(ex.total_prompt_tokens);
+            document.getElementById('d-cached-prompt').textContent = fmtNum(ex.total_cached_prompt_tokens);
             document.getElementById('d-completion').textContent = fmtNum(ex.total_completion_tokens);
             document.getElementById('d-cost').textContent = fmtCost4(ex.total_cost);
 

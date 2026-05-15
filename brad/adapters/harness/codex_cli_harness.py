@@ -355,10 +355,13 @@ class CodexCliHarness(AgentHarness):
             if etype == "turn.completed":
                 u = evt.get("usage") or {}
                 if u:
-                    usage.prompt_tokens = u.get("input_tokens") or usage.prompt_tokens
-                    usage.cached_tokens = (
-                        u.get("cached_input_tokens") or usage.cached_tokens
-                    )
+                    input_tokens = u.get("input_tokens")
+                    cached_input_tokens = u.get("cached_input_tokens")
+                    if input_tokens is not None or cached_input_tokens is not None:
+                        input_tokens = input_tokens or 0
+                        cached_input_tokens = cached_input_tokens or 0
+                        usage.cached_tokens = cached_input_tokens
+                        usage.prompt_tokens = input_tokens + cached_input_tokens
                     usage.completion_tokens = (
                         u.get("output_tokens") or usage.completion_tokens
                     )
@@ -405,8 +408,13 @@ class CodexCliHarness(AgentHarness):
                 info = payload.get("info") or {}
                 total = info.get("total_token_usage") or {}
                 if total:
-                    usage.prompt_tokens = total.get("input_tokens") or usage.prompt_tokens
-                    usage.cached_tokens = total.get("cached_input_tokens") or usage.cached_tokens
+                    input_tokens = total.get("input_tokens")
+                    cached_input_tokens = total.get("cached_input_tokens")
+                    if input_tokens is not None or cached_input_tokens is not None:
+                        input_tokens = input_tokens or 0
+                        cached_input_tokens = cached_input_tokens or 0
+                        usage.cached_tokens = cached_input_tokens
+                        usage.prompt_tokens = input_tokens + cached_input_tokens
                     usage.completion_tokens = total.get("output_tokens") or usage.completion_tokens
                     usage.total_tokens = (
                         (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)

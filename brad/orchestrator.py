@@ -161,34 +161,51 @@ class BradOrchestrator:
 
     def _calculate_cost(self, usage) -> float:
         """Calculate cost from LLM usage stats using DB model costs.
-        Cached prompt tokens are charged at 50% of normal prompt rate."""
+        Cached prompt tokens use a separate rate when known."""
         if not usage:
             return 0.0
         costs = db.get_model_cost(self.agent.harness.model_name)
         cached = getattr(usage, "cached_tokens", 0) or 0
         non_cached_prompt = max(0, usage.prompt_tokens - cached)
         prompt_cost = (non_cached_prompt / 1000.0) * costs["prompt"]
-        cached_cost = (cached / 1000.0) * costs["prompt"] * 0.5
+        cached_rate = costs.get("cached_prompt", costs["prompt"] * 0.5)
+        cached_cost = (cached / 1000.0) * cached_rate
         completion_cost = (usage.completion_tokens / 1000.0) * costs["completion"]
         return prompt_cost + cached_cost + completion_cost
+
+    @staticmethod
+    def _usage_totals(usage):
+        if not usage:
+            return 0, 0, 0
+        return (
+            usage.prompt_tokens or 0,
+            usage.completion_tokens or 0,
+            getattr(usage, "cached_tokens", 0) or 0,
+        )
 
     def _record_step(self, execution_id: int, phase: str, response: Dict) -> None:
         """Record a step with cost/usage data in the database."""
         usage = response.get("_usage")
         cost = self._calculate_cost(usage)
-        prompt_tokens = usage.prompt_tokens if usage else 0
-        completion_tokens = usage.completion_tokens if usage else 0
+        prompt_tokens, completion_tokens, cached_prompt_tokens = self._usage_totals(usage)
 
         step_id = db.create_step(execution_id, phase)
         db.finish_step(
             step_id,
             status=response.get("action", "unknown"),
             prompt_tokens=prompt_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
             completion_tokens=completion_tokens,
             cost=cost,
             result_summary=response.get("message", "")[:500],
         )
-        db.update_execution_costs(execution_id, prompt_tokens, completion_tokens, cost)
+        db.update_execution_costs(
+            execution_id,
+            prompt_tokens,
+            completion_tokens,
+            cost,
+            cached_prompt_tokens=cached_prompt_tokens,
+        )
 
     def run_once(self):
         """Main orchestration loop - process one batch of issues."""
@@ -420,19 +437,19 @@ class BradOrchestrator:
 
             usage = response.get("_usage")
             cost = self._calculate_cost(usage)
-            pt = usage.prompt_tokens if usage else 0
-            ct = usage.completion_tokens if usage else 0
+            pt, ct, cached_pt = self._usage_totals(usage)
             if step_id:
                 try:
                     db.finish_step(
                         step_id,
                         status=response.get("action", "unknown"),
                         prompt_tokens=pt,
+                        cached_prompt_tokens=cached_pt,
                         completion_tokens=ct,
                         cost=cost,
                         result_summary=str(response.get("summary", ""))[:500],
                     )
-                    db.update_execution_costs(execution_id, pt, ct, cost)
+                    db.update_execution_costs(execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
                 except Exception:
                     pass
 
@@ -1264,10 +1281,9 @@ class BradOrchestrator:
         # Record step costs
         usage = response.get("_usage")
         cost = self._calculate_cost(usage)
-        pt = usage.prompt_tokens if usage else 0
-        ct = usage.completion_tokens if usage else 0
-        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost, result_summary=response.get("message", "")[:500])
-        db.update_execution_costs(state.execution_id, pt, ct, cost)
+        pt, ct, cached_pt = self._usage_totals(usage)
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
 
         action = response.get("action")
         message = response.get("message", "")
@@ -1426,10 +1442,9 @@ class BradOrchestrator:
             message = response.get("message", "")
             usage = response.get("_usage")
             cost = self._calculate_cost(usage)
-            pt = usage.prompt_tokens if usage else 0
-            ct = usage.completion_tokens if usage else 0
-            db.finish_step(step_id, status=action or "completed", prompt_tokens=pt, completion_tokens=ct, cost=cost, result_summary=message[:500])
-            db.update_execution_costs(state.execution_id, pt, ct, cost)
+            pt, ct, cached_pt = self._usage_totals(usage)
+            db.finish_step(step_id, status=action or "completed", prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=message[:500])
+            db.update_execution_costs(state.execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
 
             if action == "approved":
                 self.ticketing.comment(state.issue_key, f"Local code review PASSED:\n\n{message}")
@@ -1470,10 +1485,9 @@ class BradOrchestrator:
         # Record step costs
         usage = response.get("_usage")
         cost = self._calculate_cost(usage)
-        pt = usage.prompt_tokens if usage else 0
-        ct = usage.completion_tokens if usage else 0
-        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost, result_summary=response.get("message", "")[:500])
-        db.update_execution_costs(state.execution_id, pt, ct, cost)
+        pt, ct, cached_pt = self._usage_totals(usage)
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
 
         action = response.get("action")
         message = response.get("message", "")
@@ -1683,10 +1697,9 @@ class BradOrchestrator:
         # Record step costs
         usage = response.get("_usage")
         cost_val = self._calculate_cost(usage)
-        pt = usage.prompt_tokens if usage else 0
-        ct = usage.completion_tokens if usage else 0
-        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
-        db.update_execution_costs(state.execution_id, pt, ct, cost_val)
+        pt, ct, cached_pt = self._usage_totals(usage)
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost_val, cached_prompt_tokens=cached_pt)
 
         action = response.get("action")
         message = response.get("message", "")
@@ -1747,10 +1760,9 @@ class BradOrchestrator:
         # Record step costs
         usage = response.get("_usage")
         cost_val = self._calculate_cost(usage)
-        pt = usage.prompt_tokens if usage else 0
-        ct = usage.completion_tokens if usage else 0
-        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
-        db.update_execution_costs(state.execution_id, pt, ct, cost_val)
+        pt, ct, cached_pt = self._usage_totals(usage)
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
+        db.update_execution_costs(state.execution_id, pt, ct, cost_val, cached_prompt_tokens=cached_pt)
 
         action = response.get("action")
         message = response.get("message", "")

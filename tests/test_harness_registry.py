@@ -271,10 +271,10 @@ class TestCodexCliHarnessInvocation:
             ),
         ):
             result = harness.run("x", str(tmp_path))
-        assert result.usage.prompt_tokens == 1000
+        assert result.usage.prompt_tokens == 1600
         assert result.usage.cached_tokens == 600
         assert result.usage.completion_tokens == 50
-        assert result.usage.total_tokens == 1050
+        assert result.usage.total_tokens == 1650
 
     def test_missing_binary_returns_error(self, tmp_path):
         harness = CodexCliHarness(
