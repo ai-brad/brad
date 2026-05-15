@@ -623,10 +623,7 @@ _COST_TTL_HOURS = 24
 
 
 def _seed_default_model_costs(conn):
-    """Seed default model costs if the table is empty."""
-    count = conn.execute("SELECT COUNT(*) FROM model_costs").fetchone()[0]
-    if count > 0:
-        return
+    """Seed any missing default model costs without overwriting existing rows."""
     now = _now()
     from datetime import timedelta
     expires = (datetime.now(timezone.utc) + timedelta(hours=_COST_TTL_HOURS)).isoformat()

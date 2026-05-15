@@ -21,6 +21,7 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import tomllib
 
 from brad.adapters.harness.base import AgentHarness, LLMResult, LLMUsage
 from brad.logging_config import get_logger
@@ -57,6 +58,7 @@ class CodexCliHarness(AgentHarness):
         # ``codex_model`` is optional. When None/empty we omit ``--model`` so
         # codex falls back to ~/.codex/config.toml (model + provider + auth).
         self.model = getattr(cfg, "codex_model", None) or None
+        self._resolved_model_name = self._resolve_model_name()
         self.sandbox = getattr(cfg, "codex_sandbox", None) or "workspace-write"
         # ``codex_approval`` controls how aggressively Codex auto-approves shell
         # commands.  For non-interactive ``codex exec`` runs the relevant knobs
@@ -77,14 +79,14 @@ class CodexCliHarness(AgentHarness):
             )
         self.logger.info(
             f"CodexCliHarness initialized: bin={self.bin} "
-            f"model={self.model or '<from ~/.codex/config.toml>'} "
+            f"model={self.model or self._resolved_model_name or '<from ~/.codex/config.toml>'} "
             f"sandbox={self.sandbox} approval={self.approval}"
         )
 
     @property
     def model_name(self) -> str:
         """Return the model name used by Codex for cost calculation."""
-        return self.model or "gpt-5-codex"
+        return self._resolved_model_name or self.model or "gpt-5-codex"
 
     def run(
         self,
@@ -221,6 +223,26 @@ class CodexCliHarness(AgentHarness):
                 f"--dangerously-bypass-approvals-and-sandbox"
             )
         return ["--dangerously-bypass-approvals-and-sandbox"]
+
+    @staticmethod
+    def _read_codex_config_model(config_path: Path) -> Optional[str]:
+        try:
+            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        model = data.get("model")
+        return model.strip() if isinstance(model, str) and model.strip() else None
+
+    def _resolve_model_name(self) -> Optional[str]:
+        if self.model:
+            return self.model
+        env_model = os.environ.get("CODEX_MODEL")
+        if env_model and env_model.strip():
+            return env_model.strip()
+        config_model = self._read_codex_config_model(Path.home() / ".codex" / "config.toml")
+        if config_model:
+            return config_model
+        return None
 
     @staticmethod
     def _build_prompt(system_prompt: str, task_prompt: str) -> str:

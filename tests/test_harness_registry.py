@@ -221,6 +221,16 @@ class TestCodexCliHarnessInvocation:
         argv = captured["argv"]
         assert "--model" not in argv
 
+    def test_model_name_reads_codex_config_when_model_flag_unset(self, tmp_path):
+        cfg = _cfg(harness="codex", codex_model=None)
+        with patch.object(
+            CodexCliHarness,
+            "_read_codex_config_model",
+            return_value="gpt-5.4",
+        ):
+            harness = CodexCliHarness(cfg)
+        assert harness.model_name == "gpt-5.4"
+
     def test_passes_model_flag_when_codex_model_set(self, tmp_path):
         harness = CodexCliHarness(_cfg(harness="codex", codex_model="gpt-5.4"))
         factory, captured = _patch_popen()
