@@ -4,7 +4,11 @@ import tempfile
 import pytest
 
 from brad import db
-from brad.gui.app import build_execution_cost_breakdown, create_app
+from brad.gui.app import (
+    build_execution_cost_breakdown,
+    build_execution_failure_context,
+    create_app,
+)
 
 
 @pytest.fixture
@@ -114,3 +118,28 @@ def test_api_execution_detail_includes_cost_breakdown(temp_db):
             "cost_pct": 100.0,
         }
     ]
+
+
+def test_build_execution_failure_context_surfaces_last_step_details():
+    execution = {
+        "status": "stuck",
+        "error_message": "Brad could not create a PR",
+        "current_phase": "stuck",
+        "current_phase_detail": "",
+    }
+    steps = [
+        {
+            "phase": "implementation",
+            "status": "success",
+            "detail": "Running LLM implementation agent",
+            "result_summary": "DONE: Created PR #2442: https://github.com/flaerobotics/bea/pull/2442\nBRAD_STATUS: READY",
+        }
+    ]
+
+    ctx = build_execution_failure_context(execution, steps)
+
+    assert ctx["primary_message"] == "Brad could not create a PR"
+    assert ctx["last_step_phase"] == "implementation"
+    assert ctx["related_pr_number"] == 2442
+    assert ctx["related_pr_url"] == "https://github.com/flaerobotics/bea/pull/2442"
+    assert "reported that it created a PR" in ctx["inferred_reason"]

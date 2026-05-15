@@ -53,6 +53,38 @@
     {% endif %}
 </div>
 
+{% if failure_context %}
+<div class="card" id="failure-context-card">
+    <h2>Failure Context</h2>
+    <div id="failure-context-container">
+        <div class="error-box" style="margin-top: 0;">
+            <strong style="color: var(--brad-error);">Why Brad stopped:</strong>
+            <pre style="margin-top: 0.5rem; white-space: pre-wrap; font-size: 0.85rem;">{{ failure_context.primary_message }}</pre>
+        </div>
+        {% if failure_context.inferred_reason %}
+        <p><strong>Likely explanation:</strong> {{ failure_context.inferred_reason }}</p>
+        {% endif %}
+        {% if failure_context.related_pr_url %}
+        <p><strong>Referenced PR:</strong> <a href="{{ failure_context.related_pr_url }}" target="_blank">PR #{{ failure_context.related_pr_number }}</a></p>
+        {% endif %}
+        {% if failure_context.last_step_phase %}
+        <p><strong>Last step:</strong> {{ failure_context.last_step_phase | replace('_', ' ') | title }}{% if failure_context.last_step_status %} ({{ failure_context.last_step_status }}){% endif %}</p>
+        {% endif %}
+        {% if failure_context.last_step_detail %}
+        <p><strong>Last step detail:</strong> {{ failure_context.last_step_detail }}</p>
+        {% endif %}
+        {% if failure_context.last_step_summary %}
+        <details open>
+            <summary><strong>Last step output</strong></summary>
+            <div class="step-summary" style="margin-top: 0.75rem;">
+                <pre>{{ failure_context.last_step_summary }}</pre>
+            </div>
+        </details>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <div class="card" id="cost-breakdown-card">
     <h2>Cost Breakdown</h2>
     <div id="cost-breakdown-container">
@@ -294,6 +326,35 @@ function renderCostBreakdown(rows) {
     container.innerHTML = html;
 }
 
+function renderFailureContext(ctx) {
+    var container = document.getElementById('failure-context-container');
+    var card = document.getElementById('failure-context-card');
+    if (!card || !container) return;
+    if (!ctx) {
+        card.style.display = 'none';
+        return;
+    }
+    card.style.display = '';
+    var html = '<div class="error-box" style="margin-top:0;"><strong style="color: var(--brad-error);">Why Brad stopped:</strong>' +
+        '<pre style="margin-top:0.5rem; white-space:pre-wrap; font-size:0.85rem;">' + (ctx.primary_message || '') + '</pre></div>';
+    if (ctx.inferred_reason) {
+        html += '<p><strong>Likely explanation:</strong> ' + ctx.inferred_reason + '</p>';
+    }
+    if (ctx.related_pr_url) {
+        html += '<p><strong>Referenced PR:</strong> <a href="' + ctx.related_pr_url + '" target="_blank">PR #' + ctx.related_pr_number + '</a></p>';
+    }
+    if (ctx.last_step_phase) {
+        html += '<p><strong>Last step:</strong> ' + phaseName(ctx.last_step_phase) + (ctx.last_step_status ? ' (' + ctx.last_step_status + ')' : '') + '</p>';
+    }
+    if (ctx.last_step_detail) {
+        html += '<p><strong>Last step detail:</strong> ' + ctx.last_step_detail + '</p>';
+    }
+    if (ctx.last_step_summary) {
+        html += '<details open><summary><strong>Last step output</strong></summary><div class="step-summary" style="margin-top: 0.75rem;"><pre>' + ctx.last_step_summary + '</pre></div></details>';
+    }
+    container.innerHTML = html;
+}
+
 function renderCIRuns(ci_runs) {
     var card = document.getElementById('ci-runs-card');
     if (!ci_runs || ci_runs.length === 0) {
@@ -437,6 +498,7 @@ function refreshAll() {
             // Update steps
             renderSteps(data.steps);
             renderCostBreakdown(data.cost_breakdown);
+            renderFailureContext(data.failure_context);
 
             // Update CI runs
             renderCIRuns(data.ci_runs);

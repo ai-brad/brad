@@ -264,3 +264,39 @@ def test_process_issue_continues_when_scrap_label_removal_fails(temp_git_repo, m
     orchestrator._process_issue(issue)
 
     orchestrator._handle_implementation_phase.assert_called_once()
+
+
+def test_process_issue_persists_specific_pr_failure_detail(temp_git_repo, monkeypatch):
+    orchestrator, _ = make_orchestrator(temp_git_repo)
+    issue = {
+        "key": "DEV-123",
+        "fields": {
+            "summary": "Implement feature",
+            "description": "Details",
+            "attachment": [],
+            "labels": [],
+            "updated": "2025-01-01",
+        },
+    }
+
+    def fake_handle_implementation(state, existing_pr):
+        state.last_failure_detail = "Failed to create PR via gh: authentication failed"
+        state.pr_number = None
+
+    orchestrator._handle_implementation_phase = Mock(side_effect=fake_handle_implementation)
+    orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=None)
+
+    monkeypatch.setattr(db, "create_execution", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    finish_execution = Mock()
+    monkeypatch.setattr(db, "finish_execution", finish_execution)
+
+    orchestrator._process_issue(issue)
+
+    finish_execution.assert_called_with(
+        1,
+        status="stuck",
+        pr_number=None,
+        pr_url=None,
+        error_message="Failed to create PR via gh: authentication failed",
+    )

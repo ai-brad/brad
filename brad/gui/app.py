@@ -1,5 +1,6 @@
 """Brad Web GUI — read-only Flask dashboard for execution history and costs."""
 import os
+import re
 from flask import Flask, render_template, jsonify
 from brad import db
 from brad.github_auth import build_github_token_provider_from_env
@@ -50,6 +51,55 @@ def build_execution_cost_breakdown(execution, steps):
     return ordered
 
 
+def build_execution_failure_context(execution, steps):
+    """Surface the most actionable failure context for a stuck/failed execution."""
+    execution = execution or {}
+    status = execution.get("status") or ""
+    if status not in {"stuck", "failed", "error"} and not execution.get("error_message"):
+        return None
+
+    last_step = steps[-1] if steps else None
+    error_message = (execution.get("error_message") or "").strip()
+    current_phase = execution.get("current_phase") or ""
+    current_phase_detail = execution.get("current_phase_detail") or ""
+    inferred_reason = ""
+    related_pr_number = None
+    related_pr_url = None
+
+    summary = (last_step or {}).get("result_summary") or ""
+    pr_match = re.search(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)", summary)
+    if pr_match:
+        related_pr_number = int(pr_match.group(1))
+        related_pr_url = pr_match.group(0)
+
+    generic_pr_failure = error_message == "Brad could not create a PR"
+    if generic_pr_failure and last_step and last_step.get("phase") == "implementation":
+        if "Created PR #" in summary:
+            inferred_reason = (
+                "The implementation step reported that it created a PR, but Brad did not "
+                "persist or verify that PR afterward. This usually means the post-run PR "
+                "verification path disagreed with the agent output."
+            )
+        elif summary:
+            inferred_reason = (
+                "The execution-level error is generic, but the implementation step summary "
+                "below may contain the more specific failure detail."
+            )
+
+    return {
+        "primary_message": error_message or current_phase_detail or status,
+        "current_phase": current_phase,
+        "current_phase_detail": current_phase_detail,
+        "last_step_phase": (last_step or {}).get("phase"),
+        "last_step_status": (last_step or {}).get("status"),
+        "last_step_detail": (last_step or {}).get("detail"),
+        "last_step_summary": summary,
+        "inferred_reason": inferred_reason,
+        "related_pr_number": related_pr_number,
+        "related_pr_url": related_pr_url,
+    }
+
+
 def create_app(db_path: str = None) -> Flask:
     """Create and configure the Flask application."""
     app = Flask(
@@ -96,12 +146,14 @@ def create_app(db_path: str = None) -> Flask:
         steps = db.get_execution_steps(execution_id)
         ci_runs = db.get_execution_ci_runs(execution_id)
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
+        failure_context = build_execution_failure_context(execution, steps)
         return render_template(
             "ticket_detail.html",
             execution=execution,
             steps=steps,
             ci_runs=ci_runs,
             cost_breakdown=cost_breakdown,
+            failure_context=failure_context,
         )
 
     @app.route("/api/status")
@@ -139,11 +191,13 @@ def create_app(db_path: str = None) -> Flask:
         steps = db.get_execution_steps(execution_id)
         ci_runs = db.get_execution_ci_runs(execution_id)
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
+        failure_context = build_execution_failure_context(execution, steps)
         return jsonify({
             "execution": execution,
             "steps": steps,
             "ci_runs": ci_runs,
             "cost_breakdown": cost_breakdown,
+            "failure_context": failure_context,
         })
 
     @app.route("/api/model-costs")

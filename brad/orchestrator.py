@@ -41,6 +41,14 @@ class IssueState:
     review_fix_count: int = 0
     local_review_fix_count: int = 0
     cost_budget: float = 150.0
+    last_failure_detail: str = ""
+
+
+RESULT_SUMMARY_LIMIT = 4000
+
+
+def _clip_summary(text: object, limit: int = RESULT_SUMMARY_LIMIT) -> str:
+    return str(text or "")[:limit]
 
 
 class BradOrchestrator:
@@ -197,7 +205,7 @@ class BradOrchestrator:
             cached_prompt_tokens=cached_prompt_tokens,
             completion_tokens=completion_tokens,
             cost=cost,
-            result_summary=response.get("message", "")[:500],
+            result_summary=_clip_summary(response.get("message", "")),
         )
         db.update_execution_costs(
             execution_id,
@@ -449,7 +457,7 @@ class BradOrchestrator:
                         cached_prompt_tokens=cached_pt,
                         completion_tokens=ct,
                         cost=cost,
-                        result_summary=str(response.get("summary", ""))[:500],
+                        result_summary=_clip_summary(response.get("summary", "")),
                     )
                     db.update_execution_costs(execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
                 except Exception:
@@ -471,7 +479,7 @@ class BradOrchestrator:
                 if execution_id:
                     try:
                         db.finish_execution(execution_id, status="error",
-                                            error_message=str(response.get("summary",""))[:500])
+                                            error_message=_clip_summary(response.get("summary","")))
                     except Exception:
                         pass
                 return
@@ -1209,12 +1217,12 @@ class BradOrchestrator:
                 status=final_status,
                 pr_number=state.pr_number,
                 pr_url=f"https://github.com/{self.cfg.github_repo}/pull/{state.pr_number}" if state.pr_number else None,
-                error_message="Brad could not create a PR" if not state.pr_number else None,
+                error_message=(state.last_failure_detail or "Brad could not create a PR") if not state.pr_number else None,
             )
 
         except Exception as e:
             db.update_execution_phase(execution_id, "error", str(e)[:200])
-            db.finish_execution(execution_id, status="error", error_message=str(e)[:500])
+            db.finish_execution(execution_id, status="error", error_message=_clip_summary(e))
             raise
 
     def _handle_requirements_phase(self, state: IssueState):
@@ -1344,7 +1352,12 @@ class BradOrchestrator:
             self._handle_ci_monitoring(state)
         else:
             self._set_phase(state, "stuck", "Could not create PR")
-            self.ticketing.comment(state.issue_key, "Brad completed implementation but failed to create PR. Manual intervention needed.")
+            detail = state.last_failure_detail or "Brad could not create a PR."
+            self.ticketing.comment(
+                state.issue_key,
+                "Brad completed implementation but failed to create PR.\n\n"
+                f"Reason:\n{detail}\n\nManual intervention needed."
+            )
 
     def _update_pr_metadata(self, state: IssueState, pr_number: int):
         """Update PR body with execution metadata for traceability."""
@@ -1379,6 +1392,7 @@ class BradOrchestrator:
         """Verify that PR actually exists. If not, attempt to create it."""
         issue_key = state.issue_key
         branch_name = state.branch_name
+        state.last_failure_detail = ""
 
         if claimed_pr_number:
             actual_pr = self.code_repo.pr_exists_for_branch(branch_name)
@@ -1398,6 +1412,7 @@ class BradOrchestrator:
                 self.repo.push(branch_name)
             except Exception as e:
                 self.logger.error(f"{issue_key}: Failed to push branch: {e}")
+                state.last_failure_detail = f"Failed to push branch before PR creation: {_clip_summary(e, 1500)}"
                 return None
 
         try:
@@ -1419,10 +1434,13 @@ class BradOrchestrator:
                 if pr_match:
                     pr_number = int(pr_match.group(1))
                     return (pr_number, pr_url)
-            self.logger.error(f"{issue_key}: Failed to create PR: {result.stderr}")
+            detail = (result.stderr or result.stdout or "gh pr create returned non-zero").strip()
+            self.logger.error(f"{issue_key}: Failed to create PR: {detail}")
+            state.last_failure_detail = f"Failed to create PR via gh: {_clip_summary(detail, 1500)}"
             return None
         except Exception as e:
             self.logger.error(f"{issue_key}: Exception creating PR: {e}")
+            state.last_failure_detail = f"Exception while creating PR: {_clip_summary(e, 1500)}"
             return None
 
     def _handle_local_review(self, state: IssueState) -> Dict:
@@ -1453,7 +1471,7 @@ class BradOrchestrator:
             usage = response.get("_usage")
             cost = self._calculate_cost(usage)
             pt, ct, cached_pt = self._usage_totals(usage)
-            db.finish_step(step_id, status=action or "completed", prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=message[:500])
+            db.finish_step(step_id, status=action or "completed", prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=_clip_summary(message))
             db.update_execution_costs(state.execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
 
             if action == "approved":
@@ -1464,7 +1482,7 @@ class BradOrchestrator:
             return {"action": "changes_requested", "message": message}
         except Exception as e:
             self.logger.error(f"{state.issue_key}: Local review failed: {e}", exc_info=True)
-            db.finish_step(step_id, status="error", result_summary=str(e)[:500])
+            db.finish_step(step_id, status="error", result_summary=_clip_summary(e))
             return {"action": "error", "message": str(e)}
 
     def _handle_local_review_fix(self, state: IssueState, review_feedback: str) -> bool:
@@ -1496,7 +1514,7 @@ class BradOrchestrator:
         usage = response.get("_usage")
         cost = self._calculate_cost(usage)
         pt, ct, cached_pt = self._usage_totals(usage)
-        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=response.get("message", "")[:500])
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=_clip_summary(response.get("message", "")))
         db.update_execution_costs(state.execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
 
         action = response.get("action")
@@ -1708,7 +1726,7 @@ class BradOrchestrator:
         usage = response.get("_usage")
         cost_val = self._calculate_cost(usage)
         pt, ct, cached_pt = self._usage_totals(usage)
-        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost_val, result_summary=_clip_summary(response.get("message", "")))
         db.update_execution_costs(state.execution_id, pt, ct, cost_val, cached_prompt_tokens=cached_pt)
 
         action = response.get("action")
@@ -1771,7 +1789,7 @@ class BradOrchestrator:
         usage = response.get("_usage")
         cost_val = self._calculate_cost(usage)
         pt, ct, cached_pt = self._usage_totals(usage)
-        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost_val, result_summary=response.get("message", "")[:500])
+        db.finish_step(step_id, status=response.get("action", "unknown"), prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost_val, result_summary=_clip_summary(response.get("message", "")))
         db.update_execution_costs(state.execution_id, pt, ct, cost_val, cached_prompt_tokens=cached_pt)
 
         action = response.get("action")
