@@ -41,7 +41,7 @@
             <div class="stat-label">Completion Tokens</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value cost" id="d-cost">${{ "%.4f"|format(execution.total_cost or 0) }}</div>
+            <div class="stat-value cost" id="d-cost"><a href="#cost-breakdown-card" style="color: inherit; text-decoration: none;">${{ "%.4f"|format(execution.total_cost or 0) }}</a></div>
             <div class="stat-label">Total Cost</div>
         </div>
     </div>
@@ -51,6 +51,44 @@
         <pre style="margin-top: 0.5rem; white-space: pre-wrap; font-size: 0.85rem;">{{ execution.error_message }}</pre>
     </div>
     {% endif %}
+</div>
+
+<div class="card" id="cost-breakdown-card">
+    <h2>Cost Breakdown</h2>
+    <div id="cost-breakdown-container">
+    {% if cost_breakdown %}
+    <table>
+        <thead>
+            <tr>
+                <th>Phase</th>
+                <th>Steps</th>
+                <th>Non-cached Input</th>
+                <th>Cached Input</th>
+                <th>Output</th>
+                <th>Total Tokens</th>
+                <th>Cost</th>
+                <th>Share</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for row in cost_breakdown %}
+            <tr>
+                <td>{{ row.phase | replace('_', ' ') | title }}</td>
+                <td>{{ row.steps }}</td>
+                <td>{{ "{:,}".format(row.non_cached_prompt_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.cached_prompt_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.completion_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.total_tokens or 0) }}</td>
+                <td class="cost">${{ "%.4f"|format(row.cost or 0) }}</td>
+                <td>{{ "%.1f"|format(row.cost_pct or 0) }}%</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><p>No step-level cost data recorded yet.</p></div>
+    {% endif %}
+    </div>
 </div>
 
 <!-- PR Details section (populated by JS if PR exists) -->
@@ -75,7 +113,7 @@
                 &nbsp;·&nbsp; <span data-utc="{{ step.started_at }}">{{ step.started_at[:19] }}</span>
                 {% if step.finished_at %} → <span data-utc="{{ step.finished_at }}">{{ step.finished_at[:19] }}</span>{% endif %}
                 &nbsp;·&nbsp; <span class="cost">${{ "%.4f"|format(step.cost or 0) }}</span>
-                &nbsp;·&nbsp; {{ "{:,}".format((step.prompt_tokens or 0) + (step.completion_tokens or 0)) }} tokens
+                &nbsp;·&nbsp; in {{ "{:,}".format(((step.prompt_tokens or 0) - (step.cached_prompt_tokens or 0))) }} + cached {{ "{:,}".format(step.cached_prompt_tokens or 0) }} + out {{ "{:,}".format(step.completion_tokens or 0) }}
             </div>
             {% if step.result_summary %}
             <div class="step-summary">
@@ -144,6 +182,7 @@ var JIRA_URL = {{ jira_url|tojson }};
 
 function fmtNum(n) { return (n || 0).toLocaleString(); }
 function fmtCost4(n) { return '$' + (n || 0).toFixed(4); }
+function fmtPct(n) { return (n || 0).toFixed(1) + '%'; }
 function truncate(s, n) { return s && s.length > n ? s.substring(0, n) + '…' : (s || ''); }
 
 function badgeClass(status) {
@@ -217,7 +256,9 @@ function renderSteps(steps) {
         html += ' &middot; ' + fmtLocalTime(step.started_at);
         if (step.finished_at) html += ' &rarr; ' + fmtLocalTime(step.finished_at);
         html += ' &middot; <span class="cost">' + fmtCost4(step.cost) + '</span>';
-        html += ' &middot; ' + fmtNum((step.prompt_tokens || 0) + (step.completion_tokens || 0)) + ' tokens';
+        html += ' &middot; in ' + fmtNum(Math.max(0, (step.prompt_tokens || 0) - (step.cached_prompt_tokens || 0)));
+        html += ' + cached ' + fmtNum(step.cached_prompt_tokens || 0);
+        html += ' + out ' + fmtNum(step.completion_tokens || 0);
         html += '</div>';
         if (step.result_summary) {
             html += '<div class="step-summary"><pre>' + truncate(step.result_summary, 500) + '</pre></div>';
@@ -225,6 +266,31 @@ function renderSteps(steps) {
         html += '</div>';
     });
     html += '</div>';
+    container.innerHTML = html;
+}
+
+function renderCostBreakdown(rows) {
+    var container = document.getElementById('cost-breakdown-container');
+    if (!container) return;
+    if (!rows || rows.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>No step-level cost data recorded yet.</p></div>';
+        return;
+    }
+    var html = '<table><thead><tr><th>Phase</th><th>Steps</th><th>Non-cached Input</th><th>Cached Input</th><th>Output</th><th>Total Tokens</th><th>Cost</th><th>Share</th></tr></thead><tbody>';
+    rows.forEach(function(row) {
+        var phase = phaseName(row.phase).replace('CI/CD', 'CI/CD');
+        html += '<tr>' +
+            '<td>' + phase + '</td>' +
+            '<td>' + fmtNum(row.steps) + '</td>' +
+            '<td>' + fmtNum(row.non_cached_prompt_tokens) + '</td>' +
+            '<td>' + fmtNum(row.cached_prompt_tokens) + '</td>' +
+            '<td>' + fmtNum(row.completion_tokens) + '</td>' +
+            '<td>' + fmtNum(row.total_tokens) + '</td>' +
+            '<td class="cost">' + fmtCost4(row.cost) + '</td>' +
+            '<td>' + fmtPct(row.cost_pct) + '</td>' +
+            '</tr>';
+    });
+    html += '</tbody></table>';
     container.innerHTML = html;
 }
 
@@ -370,6 +436,7 @@ function refreshAll() {
 
             // Update steps
             renderSteps(data.steps);
+            renderCostBreakdown(data.cost_breakdown);
 
             // Update CI runs
             renderCIRuns(data.ci_runs);

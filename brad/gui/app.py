@@ -8,6 +8,48 @@ from brad.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def build_execution_cost_breakdown(execution, steps):
+    """Aggregate per-step token/cost data into phase-level breakdown rows."""
+    total_cost = float((execution or {}).get("total_cost") or 0.0)
+    ordered = []
+    by_phase = {}
+
+    for step in steps or []:
+        phase = step.get("phase") or "unknown"
+        row = by_phase.get(phase)
+        if row is None:
+            row = {
+                "phase": phase,
+                "steps": 0,
+                "non_cached_prompt_tokens": 0,
+                "cached_prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_input_tokens": 0,
+                "total_tokens": 0,
+                "cost": 0.0,
+            }
+            by_phase[phase] = row
+            ordered.append(row)
+
+        prompt_tokens = int(step.get("prompt_tokens") or 0)
+        cached_prompt_tokens = int(step.get("cached_prompt_tokens") or 0)
+        completion_tokens = int(step.get("completion_tokens") or 0)
+        non_cached_prompt_tokens = max(0, prompt_tokens - cached_prompt_tokens)
+
+        row["steps"] += 1
+        row["non_cached_prompt_tokens"] += non_cached_prompt_tokens
+        row["cached_prompt_tokens"] += cached_prompt_tokens
+        row["completion_tokens"] += completion_tokens
+        row["total_input_tokens"] += prompt_tokens
+        row["total_tokens"] += prompt_tokens + completion_tokens
+        row["cost"] += float(step.get("cost") or 0.0)
+
+    for row in ordered:
+        row["cost_pct"] = (row["cost"] / total_cost * 100.0) if total_cost > 0 else 0.0
+
+    return ordered
+
+
 def create_app(db_path: str = None) -> Flask:
     """Create and configure the Flask application."""
     app = Flask(
@@ -53,11 +95,13 @@ def create_app(db_path: str = None) -> Flask:
             return "Execution not found", 404
         steps = db.get_execution_steps(execution_id)
         ci_runs = db.get_execution_ci_runs(execution_id)
+        cost_breakdown = build_execution_cost_breakdown(execution, steps)
         return render_template(
             "ticket_detail.html",
             execution=execution,
             steps=steps,
             ci_runs=ci_runs,
+            cost_breakdown=cost_breakdown,
         )
 
     @app.route("/api/status")
@@ -94,10 +138,12 @@ def create_app(db_path: str = None) -> Flask:
             return jsonify({"error": "not found"}), 404
         steps = db.get_execution_steps(execution_id)
         ci_runs = db.get_execution_ci_runs(execution_id)
+        cost_breakdown = build_execution_cost_breakdown(execution, steps)
         return jsonify({
             "execution": execution,
             "steps": steps,
             "ci_runs": ci_runs,
+            "cost_breakdown": cost_breakdown,
         })
 
     @app.route("/api/model-costs")
