@@ -89,6 +89,35 @@ class TestDatabaseIntegration:
         cost = db.get_model_cost("gpt-4")
         assert cost["prompt"] == 0.04
 
+    def test_default_model_costs_refresh_default_rows_but_keep_manual_overrides(self, temp_db):
+        """Default seed updates stale default rows without clobbering manual entries."""
+        db.upsert_model_cost(
+            "gpt-5.4",
+            prompt_cost_per_1k=0.005,
+            completion_cost_per_1k=0.02,
+            source="default",
+        )
+        db.upsert_model_cost(
+            "gpt-5-codex",
+            prompt_cost_per_1k=0.123,
+            completion_cost_per_1k=0.456,
+            source="manual",
+            cached_prompt_cost_per_1k=0.078,
+        )
+
+        # Re-running init_db should refresh default-backed rows in-place.
+        db.init_db(temp_db)
+
+        gpt54 = db.get_model_cost("gpt-5.4")
+        assert gpt54["prompt"] == 0.0025
+        assert gpt54["cached_prompt"] == 0.00025
+        assert gpt54["completion"] == 0.015
+
+        codex = db.get_model_cost("gpt-5-codex")
+        assert codex["prompt"] == 0.123
+        assert codex["cached_prompt"] == 0.078
+        assert codex["completion"] == 0.456
+
     def test_reconcile_running_executions_marks_stale_rows_failed(self, temp_db):
         """Startup cleanup should fail stale running executions and steps."""
         exec_id = db.create_execution("TEST-STALE", "Stale issue")

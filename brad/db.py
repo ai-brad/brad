@@ -639,14 +639,56 @@ _COST_TTL_HOURS = 24
 
 
 def _seed_default_model_costs(conn):
-    """Seed any missing default model costs without overwriting existing rows."""
+    """Seed missing default model costs and refresh stale default-backed rows.
+
+    Manual overrides are preserved by leaving any non-default ``source`` rows
+    untouched. Default-managed rows are updated so newly added cached-input
+    pricing or corrected defaults propagate to existing databases.
+    """
     now = _now()
     from datetime import timedelta
     expires = (datetime.now(timezone.utc) + timedelta(hours=_COST_TTL_HOURS)).isoformat()
     for pattern, prompt_cost, cached_prompt_cost, completion_cost, source in _DEFAULT_MODEL_COSTS:
+        row = conn.execute(
+            """
+            SELECT source
+              FROM model_costs
+             WHERE model_pattern = ?
+            """,
+            (pattern,),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO model_costs (
+                    model_pattern,
+                    prompt_cost_per_1k,
+                    cached_prompt_cost_per_1k,
+                    completion_cost_per_1k,
+                    updated_at,
+                    expires_at,
+                    source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (pattern, prompt_cost, cached_prompt_cost, completion_cost, now, expires, source),
+            )
+            continue
+
+        if row["source"] not in (None, "default"):
+            continue
+
         conn.execute(
-            "INSERT OR IGNORE INTO model_costs (model_pattern, prompt_cost_per_1k, cached_prompt_cost_per_1k, completion_cost_per_1k, updated_at, expires_at, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (pattern, prompt_cost, cached_prompt_cost, completion_cost, now, expires, source),
+            """
+            UPDATE model_costs
+               SET prompt_cost_per_1k = ?,
+                   cached_prompt_cost_per_1k = ?,
+                   completion_cost_per_1k = ?,
+                   updated_at = ?,
+                   expires_at = ?,
+                   source = ?
+             WHERE model_pattern = ?
+            """,
+            (prompt_cost, cached_prompt_cost, completion_cost, now, expires, source, pattern),
         )
 
 
