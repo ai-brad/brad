@@ -7,10 +7,6 @@ is *not* used here.
 
 Assumes a recent ``codex`` CLI is on ``PATH`` (>= the version that ships
 ``--output-last-message``; falls back to stdout if the flag is unsupported).
-
-Warm-start (``previous_response_id``) is intentionally a no-op for v1: each
-task is a fresh session.  The ``codex resume`` mechanism can be wired later if
-useful — see TODO at the end of the file.
 """
 import json
 import os
@@ -105,13 +101,15 @@ class CodexCliHarness(AgentHarness):
 
         with tempfile.TemporaryDirectory(prefix="brad-codex-") as tmpdir:
             last_msg_path = Path(tmpdir) / "last_message.txt"
-            argv = [
-                self.bin, "exec",
+            argv = [self.bin, "exec"]
+            if previous_response_id:
+                argv.extend(["resume", previous_response_id])
+            argv.extend([
                 "--cd", repo_path,
                 "--skip-git-repo-check",
                 "--output-last-message", str(last_msg_path),
                 "--json",  # stream JSONL events on stdout for live visibility
-            ]
+            ])
             if self.model:
                 argv.extend(["--model", self.model])
             argv += self._approval_flags()
@@ -120,7 +118,7 @@ class CodexCliHarness(AgentHarness):
             self.logger.info(f"=== CodexCliHarness invoking: {' '.join(argv[:-1])} (stdin) ===")
             self.logger.info(f"Task preview: {task_prompt[:300]}...")
 
-            session_id = uuid.uuid4().hex  # placeholder so callers can correlate logs
+            session_id = uuid.uuid4().hex  # fallback if codex does not emit a thread id
             try:
                 proc = subprocess.Popen(
                     argv,
@@ -163,15 +161,16 @@ class CodexCliHarness(AgentHarness):
                 pass
 
             usage = LLMUsage()
+            thread_id: Optional[str] = previous_response_id or None
             try:
-                self._stream_events(proc, usage)
+                thread_id = self._stream_events(proc, usage, default_thread_id=thread_id)
                 proc.wait(timeout=self.timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
                 msg = f"ERROR: codex exec timed out after {self.timeout}s"
                 self.logger.error(msg)
-                return LLMResult(text=msg, response_id=session_id, usage=usage)
+                return LLMResult(text=msg, response_id=thread_id or session_id, usage=usage)
             finally:
                 stderr_thread.join(timeout=2)
 
@@ -191,7 +190,7 @@ class CodexCliHarness(AgentHarness):
                 f"tokens in={usage.prompt_tokens}/cached={usage.cached_tokens}/"
                 f"out={usage.completion_tokens}) ==="
             )
-            return LLMResult(text=text, response_id=session_id, usage=usage)
+            return LLMResult(text=text, response_id=thread_id or session_id, usage=usage)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -276,7 +275,12 @@ class CodexCliHarness(AgentHarness):
             pass
         return ""
 
-    def _stream_events(self, proc: subprocess.Popen, usage: LLMUsage) -> None:
+    def _stream_events(
+        self,
+        proc: subprocess.Popen,
+        usage: LLMUsage,
+        default_thread_id: Optional[str] = None,
+    ) -> Optional[str]:
         """Consume codex's JSONL stdout, mirroring key events to brad's logger.
 
         Codex emits one JSON object per line under ``--json``.  Two schemas
@@ -296,6 +300,7 @@ class CodexCliHarness(AgentHarness):
         diagnostics on stdout in some failure modes.
         """
         assert proc.stdout is not None
+        thread_id = default_thread_id
         for raw in proc.stdout:
             line = raw.strip()
             if not line:
@@ -373,6 +378,7 @@ class CodexCliHarness(AgentHarness):
             if etype == "thread.started":
                 tid = evt.get("thread_id")
                 if tid:
+                    thread_id = tid
                     self.logger.debug(f"[codex] thread {tid}")
                 continue
 
@@ -422,10 +428,4 @@ class CodexCliHarness(AgentHarness):
             elif ptype == "error":
                 err = payload.get("message") or json.dumps(payload)[:300]
                 self.logger.error(f"[codex:error] {err}")
-
-
-# TODO(harness/warm-start): wire `codex resume <session_id>` once we capture
-# session ids reliably (likely via `--json` event stream).  When done,
-# `previous_response_id` should round-trip through the resume flow so multi-turn
-# phases (implementation -> review fix -> ci fix on the same ticket) reuse
-# context the way BradHarness does today.
+        return thread_id

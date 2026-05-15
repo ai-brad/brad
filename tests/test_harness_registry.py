@@ -166,6 +166,46 @@ class TestCodexCliHarnessInvocation:
         # JSONL streaming is always on.
         assert "--json" in argv
 
+    def test_resumes_prior_codex_thread_when_previous_response_id_present(self, tmp_path):
+        harness = CodexCliHarness(_cfg(harness="codex"))
+        events = ['{"type":"thread.started","thread_id":"thread-123"}\n']
+        factory, captured = _patch_popen(stdout_lines=events)
+        with (
+            patch(
+                "brad.adapters.harness.codex_cli_harness.subprocess.Popen",
+                side_effect=factory,
+            ),
+            patch(
+                "brad.adapters.harness.codex_cli_harness.shutil.which",
+                return_value="/usr/bin/codex",
+            ),
+        ):
+            result = harness.run(
+                "continue work",
+                str(tmp_path),
+                previous_response_id="thread-previous",
+            )
+        argv = captured["argv"]
+        assert argv[:4] == ["codex", "exec", "resume", "thread-previous"]
+        assert result.response_id == "thread-123"
+
+    def test_uses_emitted_thread_id_as_response_id(self, tmp_path):
+        harness = CodexCliHarness(_cfg(harness="codex"))
+        events = ['{"type":"thread.started","thread_id":"thread-xyz"}\n']
+        factory, _ = _patch_popen(stdout_lines=events)
+        with (
+            patch(
+                "brad.adapters.harness.codex_cli_harness.subprocess.Popen",
+                side_effect=factory,
+            ),
+            patch(
+                "brad.adapters.harness.codex_cli_harness.shutil.which",
+                return_value="/usr/bin/codex",
+            ),
+        ):
+            result = harness.run("x", str(tmp_path))
+        assert result.response_id == "thread-xyz"
+
     def test_danger_approval_mode_uses_bypass_flag(self, tmp_path):
         harness = CodexCliHarness(_cfg(harness="codex", codex_approval="danger"))
         factory, captured = _patch_popen()

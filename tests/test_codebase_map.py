@@ -9,6 +9,7 @@ from brad.codebase_map import (
     _extract_python_symbols,
     _build_tree,
     _format_map,
+    _get_repo_state_key,
     get_codebase_map,
     MAX_MAP_CHARS,
 )
@@ -118,3 +119,11 @@ class TestGetCodebaseMap:
         # Both should be valid maps
         assert "CODEBASE MAP" in text1
         assert "CODEBASE MAP" in text2
+
+    def test_repo_state_key_includes_dirty_worktree_fingerprint(self, sample_repo):
+        with (
+            patch("brad.codebase_map._get_head_commit", return_value="abc123"),
+            patch("brad.codebase_map._dirty_worktree_fingerprint", return_value="dirty-deadbeef"),
+        ):
+            key = _get_repo_state_key(str(sample_repo))
+        assert key == "abc123-dirty-deadbeef"

@@ -9,6 +9,7 @@ when main changes.
 """
 
 import ast
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -24,16 +25,57 @@ SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.mypy_cache', '.pytest_cach
              'dist', 'build', '.tox', '.eggs', 'venv', '.venv', '.brad_cache'}
 
 
-def _get_main_commit(repo_path: str) -> str:
-    """Get short SHA of origin/main HEAD."""
+def _get_head_commit(repo_path: str) -> str:
+    """Get short SHA of current HEAD."""
     try:
         r = subprocess.run(
-            ["git", "-C", repo_path, "rev-parse", "--short", "origin/main"],
+            ["git", "-C", repo_path, "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=10,
         )
         return r.stdout.strip() or "unknown"
     except Exception:
         return "unknown"
+
+
+def _dirty_worktree_fingerprint(repo_path: str) -> str:
+    """Return a stable fingerprint for local changes that affect the map."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_path, "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True, timeout=10,
+        )
+        status = r.stdout.strip()
+    except Exception:
+        return "clean"
+
+    if not status:
+        return "clean"
+
+    root = Path(repo_path)
+    parts = []
+    for line in status.splitlines():
+        rel = line[3:].strip()
+        if " -> " in rel:
+            rel = rel.split(" -> ", 1)[1]
+        path = root / rel
+        try:
+            stat = path.stat()
+            sig = f"{rel}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            sig = f"{rel}:missing"
+        parts.append(sig)
+
+    digest = hashlib.sha1("\n".join(sorted(parts)).encode("utf-8")).hexdigest()[:12]
+    return f"dirty-{digest}"
+
+
+def _get_repo_state_key(repo_path: str) -> str:
+    """Return a cache key that follows the current repo/worktree state."""
+    head = _get_head_commit(repo_path)
+    dirty = _dirty_worktree_fingerprint(repo_path)
+    if dirty == "clean":
+        return head
+    return f"{head}-{dirty}"
 
 
 def _cache_path(repo_path: str, commit: str) -> Path:
@@ -114,9 +156,9 @@ def _format_map(data: Dict) -> str:
 
 
 def get_codebase_map(repo_path: str, main_commit: Optional[str] = None) -> str:
-    """Return a compact codebase map string, cached by main commit."""
+    """Return a compact codebase map string, cached by current repo state."""
     if not main_commit:
-        main_commit = _get_main_commit(repo_path)
+        main_commit = _get_repo_state_key(repo_path)
 
     cache_file = _cache_path(repo_path, main_commit)
 
