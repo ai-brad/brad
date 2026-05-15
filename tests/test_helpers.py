@@ -34,6 +34,7 @@ def make_test_config(tmp_path, **overrides):
         deployment_health_check=True,
         deployment_log_tail_lines=200,
         deployment_log_since="10m",
+        cost_budget=150.0,
         llm_cost_per_1k_prompt_tokens=0.005,
         llm_cost_per_1k_completion_tokens=0.015,
         db_path=str(tmp_path / "test_brad.db"),

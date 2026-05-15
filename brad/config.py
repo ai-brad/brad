@@ -53,7 +53,7 @@ class Config:
     # Cost tracking
     llm_cost_per_1k_prompt_tokens: float = 0.0
     llm_cost_per_1k_completion_tokens: float = 0.0
-    cost_budget: float = 10.0
+    cost_budget: float = 150.0
 
     # Database
     db_path: str = "brad_data.db"
@@ -170,7 +170,7 @@ def load_config() -> Config:
 
         llm_cost_per_1k_prompt_tokens=float(os.environ.get("LLM_COST_PER_1K_PROMPT_TOKENS", "0.0")),
         llm_cost_per_1k_completion_tokens=float(os.environ.get("LLM_COST_PER_1K_COMPLETION_TOKENS", "0.0")),
-        cost_budget=float(os.environ.get("COST_BUDGET", "3.0")),
+        cost_budget=float(os.environ.get("COST_BUDGET", "150.0")),
 
         db_path=os.environ.get("BRAD_DB_PATH", "brad_data.db"),
 

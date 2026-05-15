@@ -106,18 +106,28 @@ def _notify_execution_observer(method_name: str, *args) -> None:
 # Executions
 # -------------------------
 
-def create_execution(issue_key: str, summary: str = "") -> int:
+def create_execution(issue_key: str, summary: str = "", cost_budget: Optional[float] = None) -> int:
     """Create a new execution record. Returns the execution ID."""
     created_at = _now()
     with _get_conn() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO executions (
-                issue_key, summary, started_at, status, last_progress_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (issue_key, summary, created_at, "running", created_at),
-        )
+        if cost_budget is None:
+            cursor = conn.execute(
+                """
+                INSERT INTO executions (
+                    issue_key, summary, started_at, status, last_progress_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (issue_key, summary, created_at, "running", created_at),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO executions (
+                    issue_key, summary, started_at, status, last_progress_at, cost_budget
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (issue_key, summary, created_at, "running", created_at, float(cost_budget)),
+            )
         exec_id = cursor.lastrowid
     logger.info(f"Created execution #{exec_id} for {issue_key}")
     _notify_execution_observer("on_execution_created", exec_id, issue_key)

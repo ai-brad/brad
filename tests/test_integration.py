@@ -32,7 +32,7 @@ class TestDatabaseIntegration:
     def test_execution_lifecycle_tracking(self, temp_db):
         """Test complete execution lifecycle is tracked in DB."""
         # Create execution
-        exec_id = db.create_execution("TEST-1", "Test issue")
+        exec_id = db.create_execution("TEST-1", "Test issue", cost_budget=150.0)
         assert exec_id > 0
         
         # Add steps
@@ -64,6 +64,7 @@ class TestDatabaseIntegration:
         assert execution["total_completion_tokens"] == 1300
         assert execution["current_phase"] == "ci_monitoring"
         assert execution["status"] == "completed"
+        assert execution["cost_budget"] == 150.0
         
         # Verify steps
         steps = db.get_execution_steps(exec_id)
@@ -305,7 +306,7 @@ class TestRealWorkflows:
         assert state.ci_fix_count == 0
         assert state.review_fix_count == 0
         assert state.local_review_fix_count == 0
-        assert state.cost_budget == 10.0
+        assert state.cost_budget == 150.0
     
     def test_iteration_limits_respected(self, temp_db, temp_git_repo):
         """Test that iteration limits prevent runaway loops."""

@@ -40,7 +40,7 @@ class IssueState:
     ci_fix_count: int = 0
     review_fix_count: int = 0
     local_review_fix_count: int = 0
-    cost_budget: float = 10.0
+    cost_budget: float = 150.0
 
 
 class BradOrchestrator:
@@ -392,7 +392,9 @@ class BradOrchestrator:
 
         try:
             execution_id = db.create_execution(
-                branch_name, f"Rebase conflict resolution for PR #{pr_number}",
+                branch_name,
+                f"Rebase conflict resolution for PR #{pr_number}",
+                cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
             )
         except Exception as e:
             self.logger.warning(f"Could not create execution for conflict resolution: {e}")
@@ -1080,7 +1082,11 @@ class BradOrchestrator:
         synthesized_description = "\n\n".join(description_parts)
 
         try:
-            execution_id = db.create_execution(issue_key, f"Review-driven CI watch on PR #{pr_number}")
+            execution_id = db.create_execution(
+                issue_key,
+                f"Review-driven CI watch on PR #{pr_number}",
+                cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
+            )
         except Exception as e:
             self.logger.warning(f"Could not create execution for CI watch on PR #{pr_number}: {e}")
             execution_id = 0
@@ -1093,7 +1099,7 @@ class BradOrchestrator:
             branch_name=branch_name,
             execution_id=execution_id,
             pr_number=pr_number,
-            cost_budget=float(self.cfg.__dict__.get("cost_budget") or 10.0),
+            cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
         )
 
         try:
@@ -1118,7 +1124,11 @@ class BradOrchestrator:
         self.logger.info(f"Summary: {summary}")
 
         # Create execution record
-        execution_id = db.create_execution(issue_key, summary)
+        execution_id = db.create_execution(
+            issue_key,
+            summary,
+            cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
+        )
 
         try:
             db.update_execution_phase(execution_id, "initializing", "Preparing to process issue")
