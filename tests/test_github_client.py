@@ -303,7 +303,7 @@ def test_get_issue_comments_accepts_app_authored_brad_reply(github_client):
         },
         {
             "id": 2,
-            "body": "Brad checking...\n\n<!-- brad:comment -->",
+            "body": "<!-- brad:status -->\n<!-- brad:source-comment-id: 1 -->\n\n> Please make the button match the forward action\n\n---\n\nBrad checking...",
             "user": {"login": "flaero-brad-bot[bot]"},
             "created_at": "2026-05-14T10:27:58Z",
             "performed_via_github_app": {"id": 123},
@@ -320,18 +320,33 @@ def test_get_issue_comments_accepts_app_authored_brad_reply(github_client):
 
 
 def test_reply_to_issue_comment_appends_hidden_marker(github_client):
-    """Brad issue comments should carry an invisible machine marker."""
+    """Brad issue comments should carry typed markers and quote the source comment."""
     mock_response = Mock()
     mock_response.raise_for_status = Mock()
     mock_response.json.return_value = {"id": 123}
+    issue_comments = [
+        {
+            "id": 1,
+            "body": "Please make the button match the forward action",
+            "user": {"login": "human-user"},
+            "created_at": "2026-05-14T10:25:15Z",
+            "performed_via_github_app": None,
+        }
+    ]
 
     with patch(
         "brad.adapters.code_repository.github_adapter.requests.post",
         return_value=mock_response,
-    ) as mock_post:
+    ) as mock_post, patch.object(
+        github_client, "fetch_issue_comments", return_value=issue_comments
+    ):
         github_client.reply_to_issue_comment(2375, 1, "Brad checking...")
 
-    assert mock_post.call_args.kwargs["json"]["body"].endswith("<!-- brad:comment -->")
+    body = mock_post.call_args.kwargs["json"]["body"]
+    assert body.startswith("<!-- brad:status -->")
+    assert "<!-- brad:source-comment-id: 1 -->" in body
+    assert "> Please make the button match the forward action" in body
+    assert body.rstrip().endswith("Brad checking...")
 
 
 def test_get_issue_comments_resumes_after_interrupted_checking_reply(github_client):
@@ -346,7 +361,7 @@ def test_get_issue_comments_resumes_after_interrupted_checking_reply(github_clie
         },
         {
             "id": 2,
-            "body": "Brad checking...\n\n<!-- brad:comment -->",
+            "body": "<!-- brad:status -->\n<!-- brad:source-comment-id: 1 -->\n\n> Please make the button match the forward action\n\n---\n\nBrad checking...",
             "user": {"login": "flaero-brad-bot[bot]"},
             "created_at": "2026-05-14T10:27:58Z",
             "performed_via_github_app": {"id": 123},
@@ -362,3 +377,63 @@ def test_get_issue_comments_resumes_after_interrupted_checking_reply(github_clie
         needs_response = github_client.get_issue_comments_needing_response(2375)
 
     assert [c["id"] for c in needs_response] == [1]
+
+
+def test_quote_markdown_preserves_blank_lines(github_client):
+    quoted = github_client.quote_markdown("Line one\n\nLine two")
+
+    assert quoted == "> Line one\n>\n> Line two"
+
+
+def test_is_brad_comment_uses_machine_marker_and_identity(github_client):
+    github_client._github_app_id = "123"
+    comment = {
+        "id": 9,
+        "body": "<!-- brad:review-result -->\n<!-- brad:source-comment-id: 4 -->\n\n> Original\n\n---\n\nBrad reaction: Fixed in latest push.",
+        "user": {"login": "flaero-brad-bot[bot]"},
+        "performed_via_github_app": {"id": 123},
+    }
+
+    assert github_client.get_brad_comment_type(comment["body"]) == "review-result"
+    assert github_client._extract_brad_source_comment_id(comment["body"]) == 4
+    assert github_client._normalized_brad_body(comment["body"]) == "Brad reaction: Fixed in latest push."
+    assert github_client.is_brad_comment(comment) is True
+
+
+def test_human_comment_with_brad_text_is_not_brad_when_identity_required(github_client):
+    comment = {
+        "id": 10,
+        "body": "Brad checking...",
+        "user": {"login": "sebastian-dix-flaerobotics-ai"},
+        "performed_via_github_app": None,
+    }
+
+    assert github_client.is_brad_comment(comment) is False
+
+
+def test_reply_to_review_comment_quotes_source(github_client):
+    mock_response = Mock()
+    mock_response.raise_for_status = Mock()
+    mock_response.json.return_value = {"id": 456}
+    review_comments = [
+        {
+            "id": 42,
+            "body": "Please add a regression test here.",
+            "user": {"login": "human-user"},
+            "created_at": "2026-05-15T08:00:00Z",
+        }
+    ]
+
+    with patch(
+        "brad.adapters.code_repository.github_adapter.requests.post",
+        return_value=mock_response,
+    ) as mock_post, patch.object(
+        github_client, "fetch_review_comments", return_value=review_comments
+    ):
+        github_client.reply_to_review_comment(2375, 42, "Brad reaction: Fixed in latest push.")
+
+    body = mock_post.call_args.kwargs["json"]["body"]
+    assert body.startswith("<!-- brad:review-result -->")
+    assert "<!-- brad:source-comment-id: 42 -->" in body
+    assert "> Please add a regression test here." in body
+    assert body.rstrip().endswith("Brad reaction: Fixed in latest push.")

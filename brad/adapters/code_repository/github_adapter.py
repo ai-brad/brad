@@ -14,7 +14,15 @@ class GitHubAdapter(CodeRepositoryAdapter):
     _BRAD_PREFIXES = ("Brad ",)
     _REVIEW_CHECKING_MESSAGE = "Brad reaction: checking..."
     _ISSUE_CHECKING_MESSAGE = "Brad checking..."
-    _BRAD_COMMENT_MARKER = "<!-- brad:comment -->"
+    _BRAD_COMMENT_MARKERS = {
+        "comment": "<!-- brad:comment -->",
+        "status": "<!-- brad:status -->",
+        "review-result": "<!-- brad:review-result -->",
+        "error": "<!-- brad:error -->",
+        "deployment-check": "<!-- brad:deployment-check -->",
+    }
+    _BRAD_MARKER_PREFIX = "<!-- brad:"
+    _BRAD_LEGACY_MARKER = _BRAD_COMMENT_MARKERS["comment"]
 
     def __init__(self, cfg):
         self.logger = get_logger(__name__)
@@ -181,11 +189,66 @@ class GitHubAdapter(CodeRepositoryAdapter):
     def _is_known_brad_author(self, comment: Dict) -> bool:
         return self._comment_author_login(comment) in self._brad_author_logins
 
+    def get_brad_comment_type(self, body: str) -> Optional[str]:
+        stripped = body.lstrip()
+        for comment_type, marker in self._BRAD_COMMENT_MARKERS.items():
+            if stripped.startswith(marker):
+                return comment_type
+        return None
+
+    def _extract_brad_source_comment_id(self, body: str) -> Optional[int]:
+        for line in body.lstrip().splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("<!-- brad:source-comment-id:") and stripped.endswith("-->"):
+                raw = stripped[len("<!-- brad:source-comment-id:") : -3].strip()
+                try:
+                    return int(raw)
+                except ValueError:
+                    return None
+            if not stripped.startswith(self._BRAD_MARKER_PREFIX):
+                break
+        return None
+
     def _has_brad_signature(self, body: str) -> bool:
-        return any(body.startswith(prefix) for prefix in self._BRAD_PREFIXES) or self._BRAD_COMMENT_MARKER in body
+        if self.get_brad_comment_type(body):
+            return True
+        return any(body.startswith(prefix) for prefix in self._BRAD_PREFIXES) or self._BRAD_LEGACY_MARKER in body
+
+    @staticmethod
+    def quote_markdown(text: str, max_chars: int = 3000) -> str:
+        text = (text or "").strip()
+        if not text:
+            return "> [original comment body unavailable]"
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip() + "\n\n[quoted comment truncated]"
+        return "\n".join(
+            f"> {line}" if line.strip() else ">"
+            for line in text.splitlines()
+        )
 
     def _normalized_brad_body(self, body: str) -> str:
-        return body.replace(self._BRAD_COMMENT_MARKER, "").strip()
+        normalized_lines = []
+        for line in body.lstrip().splitlines():
+            stripped = line.strip()
+            if stripped.startswith(self._BRAD_MARKER_PREFIX) and stripped.endswith("-->"):
+                continue
+            normalized_lines.append(line)
+        normalized = "\n".join(normalized_lines).replace(self._BRAD_LEGACY_MARKER, "").strip()
+        if "\n---\n" in normalized:
+            normalized = normalized.rsplit("\n---\n", 1)[-1].strip()
+        return normalized
+
+    def _infer_brad_comment_type(self, body: str) -> str:
+        normalized = self._normalized_brad_body(body)
+        if normalized in (self._ISSUE_CHECKING_MESSAGE, self._REVIEW_CHECKING_MESSAGE):
+            return "status"
+        if normalized.lower().startswith("brad error:"):
+            return "error"
+        if normalized.startswith("Brad reaction:"):
+            return "review-result"
+        return "comment"
 
     def is_brad_comment(self, comment: Dict) -> bool:
         """Return True when a GitHub comment/review can be trusted as Brad-authored."""
@@ -196,10 +259,47 @@ class GitHubAdapter(CodeRepositoryAdapter):
             return True
         return self._is_brad_authored_via_app(comment) or self._is_known_brad_author(comment)
 
-    def _format_brad_comment(self, body: str) -> str:
-        if self._BRAD_COMMENT_MARKER in body:
+    def _format_brad_comment(
+        self,
+        body: str,
+        *,
+        comment_type: Optional[str] = None,
+        source_comment: Optional[Dict] = None,
+    ) -> str:
+        if self.get_brad_comment_type(body):
             return body
-        return f"{body}\n\n{self._BRAD_COMMENT_MARKER}"
+        comment_type = comment_type or self._infer_brad_comment_type(body)
+        marker = self._BRAD_COMMENT_MARKERS.get(comment_type, self._BRAD_COMMENT_MARKERS["comment"])
+        parts = [marker]
+        if source_comment:
+            source_comment_id = source_comment.get("id")
+            if source_comment_id is not None:
+                parts.append(f"<!-- brad:source-comment-id: {source_comment_id} -->")
+            parts.extend(
+                [
+                    "",
+                    self.quote_markdown(source_comment.get("body", "")),
+                    "",
+                    "---",
+                    "",
+                    body.strip(),
+                ]
+            )
+        else:
+            parts.extend(["", body.strip()])
+        return "\n".join(parts).strip()
+
+    def _find_review_comment(self, pr_number: int, comment_id: int) -> Optional[Dict]:
+        for comment in self.fetch_review_comments(pr_number):
+            if comment.get("id") == comment_id:
+                return comment
+        return None
+
+    def _find_issue_comment(self, pr_number: int, comment_id: int) -> Optional[Dict]:
+        for comment in self.fetch_issue_comments(pr_number):
+            if comment.get("id") == comment_id:
+                return comment
+        return None
 
     def get_review_comments_needing_response(self, pr_number: int) -> List[Dict]:
         """Get review comments that don't have a Brad response yet.
@@ -338,10 +438,11 @@ class GitHubAdapter(CodeRepositoryAdapter):
         """
         self.logger.info(f"Replying to comment {comment_id} on PR #{pr_number}")
         try:
+            source_comment = self._find_review_comment(pr_number, comment_id)
             resp = self._request_with_retry(
                 "post",
                 f"{self.base_url}/pulls/{pr_number}/comments/{comment_id}/replies",
-                json={"body": self._format_brad_comment(body)},
+                json={"body": self._format_brad_comment(body, source_comment=source_comment)},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -670,7 +771,8 @@ class GitHubAdapter(CodeRepositoryAdapter):
         """Reply to a specific issue comment (general PR comment)."""
         self.logger.info(f"Replying to issue comment {comment_id} on PR #{pr_number}")
         try:
-            payload = {"body": self._format_brad_comment(body)}
+            source_comment = self._find_issue_comment(pr_number, comment_id)
+            payload = {"body": self._format_brad_comment(body, source_comment=source_comment)}
             resp = self._request_with_retry(
                 "post",
                 f"{self.base_url}/issues/{pr_number}/comments",
