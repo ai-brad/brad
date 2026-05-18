@@ -1,12 +1,129 @@
 """Brad Web GUI — read-only Flask dashboard for execution history and costs."""
 import os
 import re
+from typing import Callable, Optional
+
 from flask import Flask, render_template, jsonify
 from brad import db
 from brad.github_auth import build_github_token_provider_from_env
 from brad.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _looks_like_action_summary(summary: str) -> bool:
+    summary_l = (summary or "").strip().lower()
+    if not summary_l:
+        return False
+    return any(
+        summary_l.startswith(prefix)
+        for prefix in (
+            "review-driven ci watch",
+            "rebase conflict resolution",
+            "fixing ci failures",
+            "implementation",
+            "local review",
+            "local review fix",
+            "review fix",
+            "addressing review comments",
+        )
+    )
+
+
+def format_execution_status_label(status: Optional[str]) -> str:
+    status = (status or "").strip()
+    if not status:
+        return ""
+    if status.lower() == "completed":
+        return "DONE"
+    return status.upper()
+
+
+def format_execution_action(execution) -> str:
+    """Return a short action label for list views."""
+    execution = execution or {}
+    explicit = (execution.get("action") or "").strip()
+    if explicit:
+        return explicit
+
+    summary = (execution.get("summary") or "").strip()
+    phase = (execution.get("current_phase") or "").strip().lower()
+    summary_l = summary.lower()
+
+    if phase in {"conflict_resolution"} or "rebase conflict resolution" in summary_l or "rebase" in summary_l:
+        return "Rebase"
+    if phase in {"ci_fix"} or "fixing ci failures" in summary_l or ("ci" in summary_l and "fix" in summary_l):
+        return "CI Fix"
+    if phase in {"ci_monitoring"} or "review-driven ci watch" in summary_l:
+        return "CI Watch"
+    if phase in {"local_review_fix", "review_fix", "addressing_review_comments"}:
+        return "Review Fix"
+    if phase in {"local_review"} or "local review" in summary_l:
+        return "Review"
+    if phase in {"implementation", "implementing"}:
+        return "Implement"
+    if _looks_like_action_summary(summary):
+        return "Work"
+    return "Implement"
+
+
+def _make_issue_title_fetcher() -> Optional[Callable[[str], str]]:
+    jira_url = os.environ.get("JIRA_URL")
+    jira_user = os.environ.get("JIRA_USER")
+    jira_token = os.environ.get("JIRA_TOKEN")
+    if not jira_url or not jira_user or not jira_token:
+        return None
+
+    from pathlib import Path
+    from brad.adapters.ticketing.jira_adapter import JiraAdapter
+
+    class _Cfg:
+        pass
+
+    cfg = _Cfg()
+    cfg.jira_url = jira_url
+    cfg.jira_user = jira_user
+    cfg.jira_token = jira_token
+    cfg.attachments_dir = str(Path("/tmp"))
+    adapter = JiraAdapter(cfg)
+    cache = {}
+
+    def fetch(issue_key: str) -> str:
+        issue_key = (issue_key or "").strip()
+        if not issue_key:
+            return ""
+        if issue_key in cache:
+            return cache[issue_key]
+        issue = adapter.fetch_issue(issue_key)
+        title = ""
+        if issue:
+            fields = issue.get("fields", {}) or {}
+            title = (fields.get("summary") or "").strip()
+        cache[issue_key] = title
+        if title:
+            try:
+                db.update_issue_title_for_issue(issue_key, title)
+            except Exception as exc:
+                logger.debug("Could not backfill issue title for %s: %s", issue_key, exc)
+        return title
+
+    return fetch
+
+
+def decorate_execution(execution, issue_title_fetcher: Optional[Callable[[str], str]] = None):
+    """Add display-only fields used by the list views."""
+    ex = dict(execution or {})
+    issue_title = (ex.get("issue_title") or "").strip()
+    if not issue_title:
+        if issue_title_fetcher:
+            issue_title = issue_title_fetcher(ex.get("issue_key") or "")
+        if not issue_title:
+            summary = (ex.get("summary") or "").strip()
+            issue_title = summary if summary and not _looks_like_action_summary(summary) else (ex.get("issue_key") or "")
+    ex["issue_title"] = issue_title
+    ex["action"] = format_execution_action(ex)
+    ex["status_label"] = format_execution_status_label(ex.get("status"))
+    return ex
 
 
 def build_execution_cost_breakdown(execution, steps):
@@ -112,6 +229,7 @@ def create_app(db_path: str = None) -> Flask:
         db_path = os.environ.get("BRAD_DB_PATH", "brad_data.db")
 
     db.init_db(db_path)
+    issue_title_fetcher = _make_issue_title_fetcher()
 
     jira_url = os.environ.get("JIRA_URL", "https://jira.example.com")
     github_repo = os.environ.get("GITHUB_REPO", "")
@@ -123,7 +241,8 @@ def create_app(db_path: str = None) -> Flask:
     @app.route("/")
     def dashboard():
         running = db.get_running_execution()
-        recent = db.get_all_executions(limit=10)
+        running = decorate_execution(running, issue_title_fetcher) if running else None
+        recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
         totals = db.get_total_costs()
         return render_template(
             "dashboard.html",
@@ -134,13 +253,13 @@ def create_app(db_path: str = None) -> Flask:
 
     @app.route("/history")
     def history():
-        executions = db.get_all_executions(limit=200)
+        executions = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=200)]
         totals = db.get_total_costs()
         return render_template("history.html", executions=executions, totals=totals)
 
     @app.route("/execution/<int:execution_id>")
     def execution_detail(execution_id):
-        execution = db.get_execution(execution_id)
+        execution = decorate_execution(db.get_execution(execution_id), issue_title_fetcher)
         if not execution:
             return "Execution not found", 404
         steps = db.get_execution_steps(execution_id)
@@ -159,6 +278,7 @@ def create_app(db_path: str = None) -> Flask:
     @app.route("/api/status")
     def api_status():
         running = db.get_running_execution()
+        running = decorate_execution(running, issue_title_fetcher) if running else None
         totals = db.get_total_costs()
         return jsonify({
             "backend_running": running is not None,
@@ -169,7 +289,8 @@ def create_app(db_path: str = None) -> Flask:
     @app.route("/api/dashboard")
     def api_dashboard():
         running = db.get_running_execution()
-        recent = db.get_all_executions(limit=10)
+        running = decorate_execution(running, issue_title_fetcher) if running else None
+        recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
         totals = db.get_total_costs()
         return jsonify({
             "running": running,
@@ -179,13 +300,13 @@ def create_app(db_path: str = None) -> Flask:
 
     @app.route("/api/executions")
     def api_executions():
-        executions = db.get_all_executions(limit=200)
+        executions = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=200)]
         totals = db.get_total_costs()
         return jsonify({"executions": executions, "totals": totals})
 
     @app.route("/api/execution/<int:execution_id>")
     def api_execution_detail(execution_id):
-        execution = db.get_execution(execution_id)
+        execution = decorate_execution(db.get_execution(execution_id), issue_title_fetcher)
         if not execution:
             return jsonify({"error": "not found"}), 404
         steps = db.get_execution_steps(execution_id)

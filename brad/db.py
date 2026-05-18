@@ -106,27 +106,43 @@ def _notify_execution_observer(method_name: str, *args) -> None:
 # Executions
 # -------------------------
 
-def create_execution(issue_key: str, summary: str = "", cost_budget: Optional[float] = None) -> int:
+def create_execution(
+    issue_key: str,
+    summary: str = "",
+    cost_budget: Optional[float] = None,
+    issue_title: str = "",
+    action: Optional[str] = None,
+) -> int:
     """Create a new execution record. Returns the execution ID."""
     created_at = _now()
+    action_value = (action if action is not None else summary) or ""
     with _get_conn() as conn:
         if cost_budget is None:
             cursor = conn.execute(
                 """
                 INSERT INTO executions (
-                    issue_key, summary, started_at, status, last_progress_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    issue_key, summary, issue_title, action, started_at, status, last_progress_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (issue_key, summary, created_at, "running", created_at),
+                (issue_key, summary, issue_title, action_value, created_at, "running", created_at),
             )
         else:
             cursor = conn.execute(
                 """
                 INSERT INTO executions (
-                    issue_key, summary, started_at, status, last_progress_at, cost_budget
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    issue_key, summary, issue_title, action, started_at, status, last_progress_at, cost_budget
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (issue_key, summary, created_at, "running", created_at, float(cost_budget)),
+                (
+                    issue_key,
+                    summary,
+                    issue_title,
+                    action_value,
+                    created_at,
+                    "running",
+                    created_at,
+                    float(cost_budget),
+                ),
             )
         exec_id = cursor.lastrowid
     logger.info(f"Created execution #{exec_id} for {issue_key}")
@@ -274,6 +290,38 @@ def update_execution_pr(execution_id: int, pr_number: int, pr_url: str) -> None:
             (pr_number, pr_url, now, execution_id),
         )
     logger.info(f"Execution #{execution_id} linked to PR #{pr_number}")
+
+
+def update_execution_issue_title(execution_id: int, issue_title: str) -> None:
+    """Persist the Jira title for an execution."""
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE executions SET issue_title=? WHERE id=?",
+            ((issue_title or "").strip(), execution_id),
+        )
+
+
+def update_issue_title_for_issue(issue_key: str, issue_title: str) -> None:
+    """Persist the Jira title across all executions for a given issue key."""
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE executions
+               SET issue_title=?
+             WHERE issue_key=?
+               AND (issue_title IS NULL OR issue_title = '')
+            """,
+            ((issue_title or "").strip(), issue_key),
+        )
+
+
+def update_execution_action(execution_id: int, action: str) -> None:
+    """Persist the short action label for an execution."""
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE executions SET action=? WHERE id=?",
+            ((action or "").strip(), execution_id),
+        )
 
 
 def update_execution_phase(execution_id: int, phase: str, detail: str = "") -> None:

@@ -7,6 +7,9 @@ from brad import db
 from brad.gui.app import (
     build_execution_cost_breakdown,
     build_execution_failure_context,
+    decorate_execution,
+    format_execution_action,
+    format_execution_status_label,
     create_app,
 )
 
@@ -118,6 +121,51 @@ def test_api_execution_detail_includes_cost_breakdown(temp_db):
             "cost_pct": 100.0,
         }
     ]
+
+
+def test_execution_list_helpers_prefer_issue_title_and_short_action_labels():
+    execution = {
+        "issue_key": "DEV-3763",
+        "summary": "Review-driven CI watch on PR #2442",
+        "current_phase": "ci_fix",
+        "status": "completed",
+        "issue_title": "Previo - late check-in reservation notes",
+    }
+
+    decorated = decorate_execution(execution)
+
+    assert decorated["issue_title"] == "Previo - late check-in reservation notes"
+    assert decorated["action"] == "CI Fix"
+    assert decorated["status_label"] == "DONE"
+
+    assert format_execution_action({
+        "issue_key": "DEV-1",
+        "summary": "Rebase conflict resolution for PR #2110",
+        "current_phase": "conflict_resolution",
+    }) == "Rebase"
+    assert format_execution_status_label("completed") == "DONE"
+    assert format_execution_status_label("failed") == "FAILED"
+
+
+def test_api_executions_includes_display_fields(temp_db):
+    execution_id = db.create_execution(
+        "TEST-456",
+        "Review-driven CI watch on PR #77",
+        issue_title="Ticket title from Jira",
+        action="CI Fix",
+    )
+
+    app = create_app(temp_db)
+    client = app.test_client()
+
+    resp = client.get("/api/executions")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+
+    row = next(ex for ex in payload["executions"] if ex["id"] == execution_id)
+    assert row["issue_title"] == "Ticket title from Jira"
+    assert row["action"] == "CI Fix"
+    assert row["status_label"] == "RUNNING"
 
 
 def test_build_execution_failure_context_surfaces_last_step_details():

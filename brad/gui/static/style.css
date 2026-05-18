@@ -270,6 +270,19 @@ td {
 
 tr:hover { background: #f7fafc; }
 
+.execution-row {
+    cursor: pointer;
+}
+
+.execution-row:focus {
+    outline: 2px solid var(--brad-primary-light);
+    outline-offset: -2px;
+}
+
+.execution-row:hover {
+    background: #edf2f7;
+}
+
 a {
     color: var(--brad-primary);
     text-decoration: none;

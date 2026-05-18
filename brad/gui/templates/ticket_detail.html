@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% block title %}{{ execution.issue_key }} — Detail{% endblock %}
+{% block title %}{{ execution.issue_key }} — {{ execution.issue_title or 'Detail' }}{% endblock %}
 {% block content %}
 
 <div class="card">
     <h2>
         <a href="{{ jira_url }}/browse/{{ execution.issue_key }}" target="_blank" class="issue-link">{{ execution.issue_key }}</a>
-        {% if execution.summary %} — {{ execution.summary }}{% endif %}
+        {% if execution.issue_title %} — {{ execution.issue_title }}{% endif %}
     </h2>
     <div class="detail-meta" id="d-meta">
         <div>
             <strong>Status:</strong>
-            <span class="badge badge-{{ execution.status }}" id="d-status-badge">{{ execution.status }}</span>
+            <span class="badge badge-{{ execution.status }}" id="d-status-badge">{{ execution.status_label or execution.status }}</span>
         </div>
         <div id="d-phase-box">
             {% if execution.current_phase %}
@@ -460,7 +460,7 @@ function refreshAll() {
             var badge = document.getElementById('d-status-badge');
             if (badge) {
                 badge.className = 'badge ' + badgeClass(ex.status);
-                badge.textContent = ex.status;
+                badge.textContent = ex.status_label || ex.status;
             }
 
             // Update current phase
@@ -482,7 +482,7 @@ function refreshAll() {
             var prBox = document.getElementById('d-pr-box');
             if (prBox && ex.pr_number && !PR_NUMBER) {
                 PR_NUMBER = ex.pr_number;
-                prBox.innerHTML = '<strong>PR:</strong> <a href="' + ex.pr_url + '" target="_blank">PR #' + ex.pr_number + '</a>';
+                prBox.innerHTML = '<strong>PR:</strong> <a href="' + (ex.pr_url || ('https://github.com/' + GITHUB_REPO + '/pull/' + ex.pr_number)) + '" target="_blank">PR #' + ex.pr_number + '</a>';
                 // Also show PR details card
                 var prCard = document.getElementById('pr-details-card');
                 if (!prCard) {

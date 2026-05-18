@@ -399,10 +399,13 @@ class BradOrchestrator:
             return
 
         try:
+            issue_title = self._fetch_issue_title(branch_name)
             execution_id = db.create_execution(
                 branch_name,
                 f"Rebase conflict resolution for PR #{pr_number}",
                 cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
+                issue_title=issue_title,
+                action="Rebase",
             )
         except Exception as e:
             self.logger.warning(f"Could not create execution for conflict resolution: {e}")
@@ -1027,6 +1030,18 @@ class BradOrchestrator:
             parts.append(desc_text.strip())
         return "\n\n".join(parts)
 
+    def _fetch_issue_title(self, issue_key: str) -> str:
+        """Best-effort: fetch just the Jira issue title for UI traceability."""
+        try:
+            issue = self.ticketing.fetch_issue(issue_key)
+        except Exception as e:
+            self.logger.warning(f"fetch_issue({issue_key}) raised while fetching title: {e}")
+            return ""
+        if not issue:
+            return ""
+        fields = issue.get("fields", {}) or {}
+        return (fields.get("summary") or "").strip()
+
     def _summarize_prior_activity(self, issue_key: str, max_chars: int = 1500) -> str:
         """Build a short bullet-list digest of prior brad executions/steps for this issue."""
         try:
@@ -1090,10 +1105,13 @@ class BradOrchestrator:
         synthesized_description = "\n\n".join(description_parts)
 
         try:
+            issue_title = self._fetch_issue_title(issue_key)
             execution_id = db.create_execution(
                 issue_key,
                 f"Review-driven CI watch on PR #{pr_number}",
                 cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
+                issue_title=issue_title,
+                action="CI Fix",
             )
         except Exception as e:
             self.logger.warning(f"Could not create execution for CI watch on PR #{pr_number}: {e}")
@@ -1132,10 +1150,13 @@ class BradOrchestrator:
         self.logger.info(f"Summary: {summary}")
 
         # Create execution record
+        issue_title = summary
         execution_id = db.create_execution(
             issue_key,
             summary,
             cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
+            issue_title=issue_title,
+            action="Implement",
         )
 
         try:
