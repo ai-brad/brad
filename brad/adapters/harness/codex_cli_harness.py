@@ -104,12 +104,18 @@ class CodexCliHarness(AgentHarness):
             argv = [self.bin, "exec"]
             if previous_response_id:
                 argv.extend(["resume", previous_response_id])
-            argv.extend([
-                "--cd", repo_path,
-                "--skip-git-repo-check",
-                "--output-last-message", str(last_msg_path),
-                "--json",  # stream JSONL events on stdout for live visibility
-            ])
+                argv.extend([
+                    "--skip-git-repo-check",
+                    "--output-last-message", str(last_msg_path),
+                    "--json",  # stream JSONL events on stdout for live visibility
+                ])
+            else:
+                argv.extend([
+                    "--cd", repo_path,
+                    "--skip-git-repo-check",
+                    "--output-last-message", str(last_msg_path),
+                    "--json",  # stream JSONL events on stdout for live visibility
+                ])
             if self.model:
                 argv.extend(["--model", self.model])
             argv += self._approval_flags()

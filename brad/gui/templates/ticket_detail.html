@@ -86,8 +86,46 @@
 {% endif %}
 
 <div class="card" id="cost-breakdown-card">
-    <h2>Cost Breakdown</h2>
+    <h2>Ticket Cost Breakdown</h2>
     <div id="cost-breakdown-container">
+    {% if ticket_cost_breakdown or cost_breakdown %}
+    <table>
+        <thead>
+            <tr>
+                <th>Phase</th>
+                <th>Steps</th>
+                <th>Non-cached Input</th>
+                <th>Cached Input</th>
+                <th>Output</th>
+                <th>Total Tokens</th>
+                <th>Cost</th>
+                <th>Share</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for row in ticket_cost_breakdown or cost_breakdown %}
+            <tr>
+                <td>{{ row.phase | replace('_', ' ') | title }}</td>
+                <td>{{ row.steps }}</td>
+                <td>{{ "{:,}".format(row.non_cached_prompt_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.cached_prompt_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.completion_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.total_tokens or 0) }}</td>
+                <td class="cost">${{ "%.4f"|format(row.cost or 0) }}</td>
+                <td>{{ "%.1f"|format(row.cost_pct or 0) }}%</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><p>No ticket-level cost data recorded yet.</p></div>
+    {% endif %}
+    </div>
+</div>
+
+<details class="card" id="execution-cost-breakdown-card">
+    <summary><h2 style="display:inline;">Execution Cost Breakdown</h2></summary>
+    <div id="execution-cost-breakdown-container">
     {% if cost_breakdown %}
     <table>
         <thead>
@@ -118,10 +156,10 @@
         </tbody>
     </table>
     {% else %}
-    <div class="empty-state"><p>No step-level cost data recorded yet.</p></div>
+    <div class="empty-state"><p>No execution-level cost data recorded yet.</p></div>
     {% endif %}
     </div>
-</div>
+</details>
 
 <!-- PR Details section (populated by JS if PR exists) -->
 {% if execution.pr_number %}
@@ -250,6 +288,7 @@ function phaseName(phase) {
         'initializing': 'Initializing',
         'reading_requirements': 'Reading Requirements',
         'checking_existing_pr': 'Checking Existing PR',
+        'implementation': 'Implementation',
         'implementing': 'Implementing',
         'local_review': 'Local Code Review',
         'local_review_fix': 'Fixing Review Issues',
@@ -266,7 +305,7 @@ function phaseName(phase) {
         'stuck': 'Stuck',
         'error': 'Error'
     };
-    return names[phase] || phase;
+    return names[phase] || (phase ? phase.replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); }) : phase);
 }
 
 function renderSteps(steps) {
@@ -305,7 +344,7 @@ function renderCostBreakdown(rows) {
     var container = document.getElementById('cost-breakdown-container');
     if (!container) return;
     if (!rows || rows.length === 0) {
-        container.innerHTML = '<div class="empty-state"><p>No step-level cost data recorded yet.</p></div>';
+        container.innerHTML = '<div class="empty-state"><p>No ticket-level cost data recorded yet.</p></div>';
         return;
     }
     var html = '<table><thead><tr><th>Phase</th><th>Steps</th><th>Non-cached Input</th><th>Cached Input</th><th>Output</th><th>Total Tokens</th><th>Cost</th><th>Share</th></tr></thead><tbody>';
@@ -497,7 +536,7 @@ function refreshAll() {
 
             // Update steps
             renderSteps(data.steps);
-            renderCostBreakdown(data.cost_breakdown);
+            renderCostBreakdown(data.ticket_cost_breakdown || data.cost_breakdown);
             renderFailureContext(data.failure_context);
 
             // Update CI runs

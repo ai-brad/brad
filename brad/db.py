@@ -534,6 +534,36 @@ def get_executions_by_issue(issue_key: str) -> List[Dict]:
         return [dict(r) for r in rows]
 
 
+def get_ticket_cost_breakdown(issue_key: str) -> List[Dict]:
+    """Aggregate step costs across all executions for a Jira issue."""
+    issue_key = (issue_key or "").strip()
+    if not issue_key:
+        return []
+
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                s.phase AS phase,
+                COUNT(*) AS steps,
+                SUM(COALESCE(s.prompt_tokens, 0) - COALESCE(s.cached_prompt_tokens, 0)) AS non_cached_prompt_tokens,
+                SUM(COALESCE(s.cached_prompt_tokens, 0)) AS cached_prompt_tokens,
+                SUM(COALESCE(s.completion_tokens, 0)) AS completion_tokens,
+                SUM(COALESCE(s.prompt_tokens, 0)) AS total_input_tokens,
+                SUM(COALESCE(s.prompt_tokens, 0) + COALESCE(s.completion_tokens, 0)) AS total_tokens,
+                SUM(COALESCE(s.cost, 0.0)) AS cost,
+                MIN(s.started_at) AS first_started_at
+              FROM executions e
+              JOIN steps s ON s.execution_id = e.id
+             WHERE e.issue_key = ?
+             GROUP BY s.phase
+             ORDER BY first_started_at ASC
+            """,
+            (issue_key,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_total_costs() -> Dict:
     """Get aggregate cost stats."""
     with _get_conn() as conn:

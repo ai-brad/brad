@@ -168,6 +168,16 @@ def build_execution_cost_breakdown(execution, steps):
     return ordered
 
 
+def build_ticket_cost_breakdown(issue_key: str):
+    """Aggregate step cost data across all executions for a Jira issue."""
+    rows = db.get_ticket_cost_breakdown(issue_key)
+    total_cost = float(sum(float(row.get("cost") or 0.0) for row in rows))
+    for row in rows:
+        row["cost_pct"] = (float(row.get("cost") or 0.0) / total_cost * 100.0) if total_cost > 0 else 0.0
+        row.pop("first_started_at", None)
+    return rows
+
+
 def build_execution_failure_context(execution, steps):
     """Surface the most actionable failure context for a stuck/failed execution."""
     execution = execution or {}
@@ -265,6 +275,7 @@ def create_app(db_path: str = None) -> Flask:
         steps = db.get_execution_steps(execution_id)
         ci_runs = db.get_execution_ci_runs(execution_id)
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
+        ticket_cost_breakdown = build_ticket_cost_breakdown(execution.get("issue_key"))
         failure_context = build_execution_failure_context(execution, steps)
         return render_template(
             "ticket_detail.html",
@@ -272,6 +283,7 @@ def create_app(db_path: str = None) -> Flask:
             steps=steps,
             ci_runs=ci_runs,
             cost_breakdown=cost_breakdown,
+            ticket_cost_breakdown=ticket_cost_breakdown,
             failure_context=failure_context,
         )
 
@@ -312,12 +324,14 @@ def create_app(db_path: str = None) -> Flask:
         steps = db.get_execution_steps(execution_id)
         ci_runs = db.get_execution_ci_runs(execution_id)
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
+        ticket_cost_breakdown = build_ticket_cost_breakdown(execution.get("issue_key"))
         failure_context = build_execution_failure_context(execution, steps)
         return jsonify({
             "execution": execution,
             "steps": steps,
             "ci_runs": ci_runs,
             "cost_breakdown": cost_breakdown,
+            "ticket_cost_breakdown": ticket_cost_breakdown,
             "failure_context": failure_context,
         })
 

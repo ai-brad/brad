@@ -92,12 +92,16 @@ class _FakePopen:
     ``--output-last-message`` so :meth:`_extract_final_text` can pick it up.
     """
 
+    class _StdinBuffer(io.StringIO):
+        def close(self):
+            pass
+
     def __init__(
         self, argv, stdout_lines=(), returncode=0, last_message=None, **_kwargs
     ):
         self.argv = argv
         self.returncode = returncode
-        self.stdin = io.StringIO()
+        self.stdin = self._StdinBuffer()
         self.stdout = io.StringIO("".join(stdout_lines))
         self.stderr = io.StringIO("")
         if last_message is not None and "--output-last-message" in argv:
@@ -187,7 +191,31 @@ class TestCodexCliHarnessInvocation:
             )
         argv = captured["argv"]
         assert argv[:4] == ["codex", "exec", "resume", "thread-previous"]
+        assert "--cd" not in argv
         assert result.response_id == "thread-123"
+
+    def test_simple_direct_prompt_invocation_uses_repo_prompt_without_side_effects(self, tmp_path):
+        harness = CodexCliHarness(_cfg(harness="codex"))
+        events = ['{"type":"thread.started","thread_id":"thread-simple"}\n']
+        factory, captured = _patch_popen(stdout_lines=events)
+        with (
+            patch(
+                "brad.adapters.harness.codex_cli_harness.subprocess.Popen",
+                side_effect=factory,
+            ),
+            patch(
+                "brad.adapters.harness.codex_cli_harness.shutil.which",
+                return_value="/usr/bin/codex",
+            ),
+        ):
+            result = harness.run(
+                task_prompt="print hello world",
+                repo_path=str(tmp_path),
+                system_prompt="",
+            )
+        assert result.response_id == "thread-simple"
+        assert captured["proc"].stdin.getvalue().startswith("# Task")
+        assert "print hello world" in captured["proc"].stdin.getvalue()
 
     def test_uses_emitted_thread_id_as_response_id(self, tmp_path):
         harness = CodexCliHarness(_cfg(harness="codex"))
