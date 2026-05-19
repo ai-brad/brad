@@ -27,6 +27,7 @@
                 <th>Issue</th>
                 <th>Issue Title</th>
                 <th>Action</th>
+                <th>Model</th>
                 <th>Status</th>
                 <th>Started</th>
                 <th>Finished</th>
@@ -42,6 +43,7 @@
                 <td><a href="{{ jira_url }}/browse/{{ ex.issue_key }}" target="_blank" class="issue-link"><strong>{{ ex.issue_key }}</strong></a></td>
                 <td>{{ ex.issue_title[:50] }}{% if ex.issue_title|length > 50 %}…{% endif %}</td>
                 <td>{{ ex.action }}</td>
+                <td>{{ ex.model_name or '—' }}</td>
                 <td>
                     <span class="badge badge-{{ ex.status }}">{{ ex.status_label }}</span>
                 </td>
@@ -134,6 +136,7 @@ function refreshHistory() {
                     '<td><a href="' + JIRA_URL + '/browse/' + ex.issue_key + '" target="_blank" class="issue-link"><strong>' + ex.issue_key + '</strong></a></td>' +
                     '<td>' + truncate(ex.issue_title, 50) + '</td>' +
                     '<td>' + (ex.action || '') + '</td>' +
+                    '<td>' + (ex.model_name || '—') + '</td>' +
                     '<td><span class="badge ' + badgeClass(ex.status) + '">' + executionStatusLabel(ex.status) + '</span></td>' +
                     '<td>' + fmtLocalTime(ex.started_at) + '</td>' +
                     '<td>' + fmtLocalTime(ex.finished_at) + '</td>' +

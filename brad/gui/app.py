@@ -42,13 +42,6 @@ def format_execution_status_label(status: Optional[str]) -> str:
     return status.upper()
 
 
-def format_control_status_label(state: Optional[str]) -> str:
-    state = (state or "").strip().lower()
-    if not state:
-        return ""
-    return state.upper()
-
-
 def format_execution_action(execution) -> str:
     """Return a short action label for list views."""
     execution = execution or {}
@@ -124,6 +117,7 @@ def decorate_execution(execution, issue_title_fetcher: Optional[Callable[[str], 
     """Add display-only fields used by the list views."""
     ex = dict(execution or {})
     issue_title = (ex.get("issue_title") or "").strip()
+    ex["model_name"] = (ex.get("model_name") or "").strip()
     if not issue_title:
         if issue_title_fetcher:
             issue_title = issue_title_fetcher(ex.get("issue_key") or "")
@@ -281,13 +275,11 @@ def create_app(db_path: str = None) -> Flask:
         running = decorate_execution(running, issue_title_fetcher) if running else None
         recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
         totals = db.get_total_costs()
-        control = db.get_control_state()
         return render_template(
             "dashboard.html",
             running=running,
             recent=recent,
             totals=totals,
-            control=control,
         )
 
     @app.route("/history")
@@ -306,6 +298,7 @@ def create_app(db_path: str = None) -> Flask:
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
         ticket_cost_breakdown = build_ticket_cost_breakdown(execution.get("issue_key"))
         failure_context = build_execution_failure_context(execution, steps)
+        issue_control = db.get_issue_control_state(execution.get("issue_key"))
         return render_template(
             "ticket_detail.html",
             execution=execution,
@@ -314,6 +307,7 @@ def create_app(db_path: str = None) -> Flask:
             cost_breakdown=cost_breakdown,
             ticket_cost_breakdown=ticket_cost_breakdown,
             failure_context=failure_context,
+            issue_control=issue_control,
         )
 
     @app.route("/api/status")
@@ -321,11 +315,9 @@ def create_app(db_path: str = None) -> Flask:
         running = db.get_running_execution()
         running = decorate_execution(running, issue_title_fetcher) if running else None
         totals = db.get_total_costs()
-        control = db.get_control_state()
         return jsonify({
             "backend_running": running is not None,
             "current_issue": running["issue_key"] if running else None,
-            "brad_state": control["state"],
             "totals": totals,
         })
 
@@ -335,12 +327,10 @@ def create_app(db_path: str = None) -> Flask:
         running = decorate_execution(running, issue_title_fetcher) if running else None
         recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
         totals = db.get_total_costs()
-        control = db.get_control_state()
         return jsonify({
             "running": running,
             "recent": recent,
             "totals": totals,
-            "control": control,
         })
 
     @app.route("/api/executions")
@@ -359,6 +349,7 @@ def create_app(db_path: str = None) -> Flask:
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
         ticket_cost_breakdown = build_ticket_cost_breakdown(execution.get("issue_key"))
         failure_context = build_execution_failure_context(execution, steps)
+        issue_control = db.get_issue_control_state(execution.get("issue_key"))
         return jsonify({
             "execution": execution,
             "steps": steps,
@@ -366,29 +357,31 @@ def create_app(db_path: str = None) -> Flask:
             "cost_breakdown": cost_breakdown,
             "ticket_cost_breakdown": ticket_cost_breakdown,
             "failure_context": failure_context,
+            "issue_control": issue_control,
         })
 
-    @app.route("/api/control", methods=["GET"])
-    def api_control():
-        return jsonify({"control": db.get_control_state()})
-
-    @app.route("/api/control/stop", methods=["POST"])
-    def api_control_stop():
+    @app.route("/api/execution/<int:execution_id>/stop", methods=["POST"])
+    def api_execution_stop(execution_id):
+        execution = db.get_execution(execution_id)
+        if not execution:
+            return jsonify({"error": "not found"}), 404
         payload = request.get_json(silent=True) or {}
         reason = (request.form.get("reason") or payload.get("reason") or "").strip()
         updated_by = request.remote_addr or "dashboard"
-        control = db.set_control_state("stopped", reason=reason, updated_by=updated_by)
-        _maybe_kill_worker()
+        control = db.set_issue_control_state(execution["issue_key"], "stopped", reason=reason, updated_by=updated_by)
         if request.is_json:
             return jsonify({"control": control})
         return _render_dashboard_redirect()
 
-    @app.route("/api/control/resume", methods=["POST"])
-    def api_control_resume():
+    @app.route("/api/execution/<int:execution_id>/resume", methods=["POST"])
+    def api_execution_resume(execution_id):
+        execution = db.get_execution(execution_id)
+        if not execution:
+            return jsonify({"error": "not found"}), 404
         payload = request.get_json(silent=True) or {}
         reason = (request.form.get("reason") or payload.get("reason") or "").strip()
         updated_by = request.remote_addr or "dashboard"
-        control = db.set_control_state("running", reason=reason, updated_by=updated_by)
+        control = db.set_issue_control_state(execution["issue_key"], "running", reason=reason, updated_by=updated_by)
         if request.is_json:
             return jsonify({"control": control})
         return _render_dashboard_redirect()

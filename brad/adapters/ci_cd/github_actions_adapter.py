@@ -36,15 +36,21 @@ class GitHubActionsAdapter(CICDAdapter):
     # -------------------------
     # Wait for PR pipeline to finish (all workflows)
     # -------------------------
-    def wait_for_pr(self, pr_number: int, poll_interval: int = 60, timeout: int = 3600) -> CIResult:
+    def wait_for_pr(
+        self,
+        pr_number: int,
+        poll_interval: int = 60,
+        timeout: int = 3600,
+        issue_key: Optional[str] = None,
+    ) -> CIResult:
         self.logger.info(f"Waiting for CI completion on PR #{pr_number} (timeout: {timeout}s, poll: {poll_interval}s)")
         start_time = time.time()
         iteration = 0
 
         while True:
-            if db.is_brad_stopped():
-                self.logger.info(f"Stop requested; aborting CI wait for PR #{pr_number}")
-                raise KeyboardInterrupt()
+            if db.is_brad_stopped(issue_key):
+                self.logger.info(f"Stop requested for {issue_key or pr_number}; aborting CI wait")
+                return CIResult(success=False, logs="Brad stopped this ticket", failed_jobs=[], stopped=True)
             iteration += 1
             elapsed = time.time() - start_time
 
@@ -82,7 +88,14 @@ class GitHubActionsAdapter(CICDAdapter):
     # -------------------------
     # Check deployment health
     # -------------------------
-    def check_deployment_health(self, pr_number: Optional[int] = None, branch: Optional[str] = None, max_attempts: int = 30, wait_seconds: int = 10) -> Dict:
+    def check_deployment_health(
+        self,
+        pr_number: Optional[int] = None,
+        branch: Optional[str] = None,
+        max_attempts: int = 30,
+        wait_seconds: int = 10,
+        issue_key: Optional[str] = None,
+    ) -> Dict:
         deploy_info = self.resolve_deployment_env(pr_number=pr_number, branch=branch)
         if not deploy_info:
             return {"healthy": False, "error": "Could not resolve deployment environment"}
@@ -93,9 +106,9 @@ class GitHubActionsAdapter(CICDAdapter):
         )
 
         for attempt in range(1, max_attempts + 1):
-            if db.is_brad_stopped():
-                self.logger.info(f"Stop requested; aborting deployment health check for {deploy_info.environment}")
-                raise KeyboardInterrupt()
+            if db.is_brad_stopped(issue_key):
+                self.logger.info(f"Stop requested for {issue_key or pr_number}; aborting deployment health check")
+                return {"healthy": False, "error": "Brad stopped this ticket", "stopped": True}
             try:
                 version_resp = requests.get(deploy_info.api_version_url, timeout=10)
                 config_resp = requests.get(deploy_info.api_config_url, timeout=10)

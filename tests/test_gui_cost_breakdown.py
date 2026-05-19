@@ -125,6 +125,31 @@ def test_api_execution_detail_includes_cost_breakdown(temp_db):
     assert payload["ticket_cost_breakdown"] == payload["cost_breakdown"]
 
 
+def test_execution_detail_and_history_show_model_name(temp_db):
+    execution_id = db.create_execution(
+        "TEST-MODEL",
+        "Model display test",
+        cost_budget=150.0,
+        model_name="gpt-5.4-mini",
+    )
+    db.finish_execution(execution_id, status="completed")
+
+    app = create_app(temp_db)
+    client = app.test_client()
+
+    detail_resp = client.get(f"/execution/{execution_id}")
+    assert detail_resp.status_code == 200
+    detail_html = detail_resp.get_data(as_text=True)
+    assert "Model:" in detail_html
+    assert "gpt-5.4-mini" in detail_html
+
+    history_resp = client.get("/history")
+    assert history_resp.status_code == 200
+    history_html = history_resp.get_data(as_text=True)
+    assert "<th>Model</th>" in history_html
+    assert "gpt-5.4-mini" in history_html
+
+
 def test_build_ticket_cost_breakdown_aggregates_across_executions(temp_db):
     implementation_id = db.create_execution("TEST-999", "Add feature", cost_budget=150.0)
     impl_step = db.create_step(implementation_id, "implementation", "Implementing")

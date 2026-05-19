@@ -12,6 +12,10 @@
             <strong>Status:</strong>
             <span class="badge badge-{{ execution.status }}" id="d-status-badge">{{ execution.status_label or execution.status }}</span>
         </div>
+        <div>
+            <strong>Model:</strong>
+            <span id="d-model">{{ execution.model_name or '—' }}</span>
+        </div>
         <div id="d-phase-box">
             {% if execution.current_phase %}
             <strong>Current Phase:</strong>
@@ -51,6 +55,37 @@
         <pre style="margin-top: 0.5rem; white-space: pre-wrap; font-size: 0.85rem;">{{ execution.error_message }}</pre>
     </div>
     {% endif %}
+</div>
+
+<div class="card" id="issue-control-card">
+    <h2>Issue Control</h2>
+    <div class="status-box {% if issue_control.state == 'stopped' %}stopped{% else %}idle{% endif %}" id="issue-control-status-box">
+        <span class="status-dot {% if issue_control.state == 'stopped' %}stopped{% else %}idle{% endif %}" id="issue-control-status-dot"></span>
+        <div id="issue-control-status-text">
+            {% if issue_control.state == 'stopped' %}
+            <strong>This ticket is stopped</strong>
+            {% if issue_control.reason %} — {{ issue_control.reason }}{% endif %}
+            {% else %}
+            <strong>This ticket is running</strong> — Brad may work on it
+            {% endif %}
+            <br>
+            <small>State: <span class="badge badge-{{ issue_control.state }}" id="issue-control-state-badge">{{ issue_control.state|upper }}</span></small>
+            {% if issue_control.updated_at %}
+            <small> · Updated: <span data-utc="{{ issue_control.updated_at }}">{{ issue_control.updated_at }}</span></small>
+            {% endif %}
+            {% if issue_control.updated_by %}
+            <br><small>Updated by: {{ issue_control.updated_by }}</small>
+            {% endif %}
+        </div>
+    </div>
+    <form class="control-form" method="post" action="/api/execution/{{ execution.id }}/stop">
+        <label for="issue-control-reason"><strong>Stop reason</strong> <small>(optional)</small></label>
+        <input id="issue-control-reason" name="reason" type="text" placeholder="Stop work on this ticket" maxlength="200">
+        <div class="control-actions">
+            <button type="submit" class="danger-button">Stop this ticket</button>
+            <button type="submit" formaction="/api/execution/{{ execution.id }}/resume" class="secondary-button">Resume this ticket</button>
+        </div>
+    </form>
 </div>
 
 {% if failure_context %}
@@ -260,6 +295,7 @@ function badgeClass(status) {
     if (status === 'running') return 'badge-running';
     if (status === 'error') return 'badge-error';
     if (status === 'stuck' || status === 'changes_requested') return 'badge-stuck';
+    if (status === 'stopped') return 'badge-stopped';
     return 'badge-running';
 }
 

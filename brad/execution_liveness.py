@@ -134,31 +134,19 @@ class ExecutionLivenessTracker:
 
     def _handle_sigterm(self, signum, frame) -> None:
         reason = "Worker interrupted by service stop signal"
-        if db.is_brad_stopped():
-            failed = self.mark_active_stopped(reason)
-            status_label = "stopped"
-        else:
-            failed = self.mark_active_failed(reason)
-            status_label = "failed"
+        failed = self.mark_active_stopped(reason)
         self.logger.warning(
-            "Received SIGTERM; marked %d active execution(s) %s before exit",
+            "Received SIGTERM; marked %d active execution(s) stopped before exit",
             failed,
-            status_label,
         )
         raise KeyboardInterrupt()
 
     def _handle_sigint(self, signum, frame) -> None:
         reason = "Worker interrupted by operator"
-        if db.is_brad_stopped():
-            failed = self.mark_active_stopped(reason)
-            status_label = "stopped"
-        else:
-            failed = self.mark_active_failed(reason)
-            status_label = "failed"
+        failed = self.mark_active_stopped(reason)
         self.logger.warning(
-            "Received SIGINT; marked %d active execution(s) %s before exit",
+            "Received SIGINT; marked %d active execution(s) stopped before exit",
             failed,
-            status_label,
         )
         raise KeyboardInterrupt()
 

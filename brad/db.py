@@ -33,6 +33,7 @@ def init_db(db_path: str = "brad_data.db") -> None:
         """)
         _run_migrations(conn)
         _ensure_control_state(conn)
+        _ensure_issue_control_state(conn)
         _seed_default_model_costs(conn)
     logger.info("Database initialized")
 
@@ -104,6 +105,20 @@ def _ensure_control_state(conn) -> None:
     )
 
 
+def _ensure_issue_control_state(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS issue_control (
+            issue_key TEXT PRIMARY KEY,
+            state TEXT NOT NULL DEFAULT 'running',
+            reason TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+
 def set_execution_runtime_observer(observer) -> None:
     """Register a worker-local execution observer for liveness tracking."""
     global _EXECUTION_RUNTIME_OBSERVER
@@ -133,32 +148,35 @@ def create_execution(
     cost_budget: Optional[float] = None,
     issue_title: str = "",
     action: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> int:
     """Create a new execution record. Returns the execution ID."""
     created_at = _now()
     action_value = (action if action is not None else summary) or ""
+    model_value = (model_name or "").strip() or None
     with _get_conn() as conn:
         if cost_budget is None:
             cursor = conn.execute(
                 """
                 INSERT INTO executions (
-                    issue_key, summary, issue_title, action, started_at, status, last_progress_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    issue_key, summary, issue_title, action, model_name, started_at, status, last_progress_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (issue_key, summary, issue_title, action_value, created_at, "running", created_at),
+                (issue_key, summary, issue_title, action_value, model_value, created_at, "running", created_at),
             )
         else:
             cursor = conn.execute(
                 """
                 INSERT INTO executions (
-                    issue_key, summary, issue_title, action, started_at, status, last_progress_at, cost_budget
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    issue_key, summary, issue_title, action, model_name, started_at, status, last_progress_at, cost_budget
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     issue_key,
                     summary,
                     issue_title,
                     action_value,
+                    model_value,
                     created_at,
                     "running",
                     created_at,
@@ -363,9 +381,70 @@ def get_control_state() -> Dict:
     }
 
 
-def is_brad_stopped() -> bool:
-    """True when the global Brad stop switch is enabled."""
-    return (get_control_state().get("state") or "").strip().lower() == "stopped"
+def get_issue_control_state(issue_key: str) -> Dict:
+    """Return the stop state for a specific issue."""
+    issue_key = (issue_key or "").strip()
+    if not issue_key:
+        return {
+            "issue_key": "",
+            "state": "running",
+            "reason": "",
+            "updated_at": "",
+            "updated_by": "",
+        }
+    try:
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT issue_key, state, reason, updated_at, updated_by FROM issue_control WHERE issue_key = ?",
+                (issue_key,),
+            ).fetchone()
+            if row:
+                return dict(row)
+    except Exception:
+        pass
+    return {
+        "issue_key": issue_key,
+        "state": "running",
+        "reason": "",
+        "updated_at": "",
+        "updated_by": "",
+    }
+
+
+def set_issue_control_state(issue_key: str, state: str, reason: str = "", updated_by: str = "") -> Dict:
+    """Update the stop state for a specific issue."""
+    issue_key = (issue_key or "").strip()
+    if not issue_key:
+        raise ValueError("issue_key must be provided")
+
+    normalized_state = (state or "").strip().lower()
+    if normalized_state not in {"running", "stopped"}:
+        raise ValueError(f"Unknown issue control state: {state!r}")
+
+    updated_at = _now()
+    with _get_conn() as conn:
+        _ensure_issue_control_state(conn)
+        conn.execute(
+            """
+            INSERT INTO issue_control (issue_key, state, reason, updated_at, updated_by)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(issue_key) DO UPDATE SET
+                state=excluded.state,
+                reason=excluded.reason,
+                updated_at=excluded.updated_at,
+                updated_by=excluded.updated_by
+            """,
+            (issue_key, normalized_state, (reason or "").strip(), updated_at, (updated_by or "").strip()),
+        )
+    return get_issue_control_state(issue_key)
+
+
+def is_brad_stopped(issue_key: Optional[str] = None) -> bool:
+    """True when the given issue has been paused."""
+    issue_key = (issue_key or "").strip()
+    if not issue_key:
+        return False
+    return (get_issue_control_state(issue_key).get("state") or "").strip().lower() == "stopped"
 
 
 def set_control_state(state: str, reason: str = "", updated_by: str = "") -> Dict:

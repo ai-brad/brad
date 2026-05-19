@@ -4,6 +4,7 @@ Tests actual DB operations, phase transitions, cost tracking, etc.
 """
 import tempfile
 import os
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import pytest
@@ -32,7 +33,7 @@ class TestDatabaseIntegration:
     def test_execution_lifecycle_tracking(self, temp_db):
         """Test complete execution lifecycle is tracked in DB."""
         # Create execution
-        exec_id = db.create_execution("TEST-1", "Test issue", cost_budget=150.0)
+        exec_id = db.create_execution("TEST-1", "Test issue", cost_budget=150.0, model_name="gpt-5.4-mini")
         assert exec_id > 0
         
         # Add steps
@@ -65,6 +66,7 @@ class TestDatabaseIntegration:
         assert execution["current_phase"] == "ci_monitoring"
         assert execution["status"] == "completed"
         assert execution["cost_budget"] == 150.0
+        assert execution["model_name"] == "gpt-5.4-mini"
         
         # Verify steps
         steps = db.get_execution_steps(exec_id)
@@ -114,10 +116,84 @@ class TestDatabaseIntegration:
         assert gpt54["cached_prompt"] == 0.00025
         assert gpt54["completion"] == 0.015
 
+        gpt54_mini = db.get_model_cost("gpt-5.4-mini")
+        assert gpt54_mini["prompt"] == 0.00075
+        assert gpt54_mini["cached_prompt"] == 0.000075
+        assert gpt54_mini["completion"] == 0.0045
+
         codex = db.get_model_cost("gpt-5-codex")
         assert codex["prompt"] == 0.123
         assert codex["cached_prompt"] == 0.078
         assert codex["completion"] == 0.456
+
+    def test_execution_model_name_migration_backfills_legacy_rows(self):
+        """Migration 010 should add model_name and backfill old rows."""
+        fd, temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(temp_db)
+        legacy = sqlite3.connect(temp_db)
+        legacy.execute(
+            """
+            CREATE TABLE executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_key TEXT NOT NULL,
+                summary TEXT DEFAULT '',
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT DEFAULT 'running',
+                pr_number INTEGER,
+                pr_url TEXT,
+                total_prompt_tokens INTEGER DEFAULT 0,
+                total_completion_tokens INTEGER DEFAULT 0,
+                total_cost REAL DEFAULT 0.0,
+                error_message TEXT
+            )
+            """
+        )
+        legacy.execute(
+            """
+            CREATE TABLE steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT DEFAULT 'running',
+                prompt_tokens INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                cost REAL DEFAULT 0.0,
+                result_summary TEXT,
+                FOREIGN KEY (execution_id) REFERENCES executions(id)
+            )
+            """
+        )
+        legacy.execute(
+            """
+            CREATE TABLE ci_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id INTEGER NOT NULL,
+                run_id INTEGER,
+                workflow_name TEXT,
+                conclusion TEXT,
+                logs_summary TEXT,
+                checked_at TEXT NOT NULL,
+                FOREIGN KEY (execution_id) REFERENCES executions(id)
+            )
+            """
+        )
+        legacy.execute(
+            "INSERT INTO executions (issue_key, summary, started_at, status) VALUES (?, ?, datetime('now'), 'completed')",
+            ("TEST-LEGACY", "Legacy run"),
+        )
+        legacy.commit()
+        legacy.close()
+
+        db.init_db(temp_db)
+
+        execution = db.get_latest_execution_for_issue("TEST-LEGACY")
+        assert execution is not None
+        assert execution["model_name"] == "gpt-5.4"
+        os.unlink(temp_db)
 
     def test_reconcile_running_executions_marks_stale_rows_failed(self, temp_db):
         """Startup cleanup should fail stale running executions and steps."""

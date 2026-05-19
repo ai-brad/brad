@@ -7,6 +7,7 @@ class CIResult(NamedTuple):
     success: bool
     logs: str
     failed_jobs: List[str]
+    stopped: bool = False
 
 
 class DeploymentInfo(NamedTuple):
@@ -29,7 +30,13 @@ class CICDAdapter(ABC):
     """
 
     @abstractmethod
-    def wait_for_pr(self, pr_number: int, poll_interval: int = 60, timeout: int = 3600) -> CIResult:
+    def wait_for_pr(
+        self,
+        pr_number: int,
+        poll_interval: int = 60,
+        timeout: int = 3600,
+        issue_key: Optional[str] = None,
+    ) -> CIResult:
         """Wait for all CI workflows to complete for a PR. Returns aggregated result."""
         ...
 
@@ -39,7 +46,14 @@ class CICDAdapter(ABC):
         ...
 
     @abstractmethod
-    def check_deployment_health(self, pr_number: Optional[int] = None, branch: Optional[str] = None, max_attempts: int = 30, wait_seconds: int = 10) -> Dict:
+    def check_deployment_health(
+        self,
+        pr_number: Optional[int] = None,
+        branch: Optional[str] = None,
+        max_attempts: int = 30,
+        wait_seconds: int = 10,
+        issue_key: Optional[str] = None,
+    ) -> Dict:
         """Check if the deployed environment is healthy."""
         ...
 

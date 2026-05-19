@@ -1,1 +1,2 @@
-Run `pytest -q` before pushing changes; if the change affects VM behavior, push `main` and redeploy from `/home/seb/deploy-brad` with `./deploy_to_vm.sh`.
+`brad` owns the worker, GUI, orchestrator, adapters, prompts, and DB migrations; if a behavior change must reach `brad-vm`, push `main` here and redeploy from `/home/seb/deploy-brad`.
+Before pushing run `pytest -q`; when debugging a live failure, use the UI/API first, then confirm with VM worker logs and `/home/sebastian/brad/brad_data.db` instead of guessing from summaries.
