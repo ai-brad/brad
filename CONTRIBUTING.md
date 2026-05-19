@@ -61,7 +61,8 @@ cp .env.example .env
 
 7. **Verify installation:**
 ```bash
-uv run python brad.py --help
+source .venv/bin/activate
+pytest -q
 ```
 
 ### Development Workflow
@@ -75,7 +76,8 @@ git checkout -b feature/your-feature-name
 
 3. **Run tests:**
 ```bash
-uv run pytest tests/ -v
+source .venv/bin/activate
+pytest -q
 ```
 
 4. **Check code style:**
@@ -99,32 +101,37 @@ git push origin feature/your-feature-name
 ### Run All Tests
 
 ```bash
-uv run pytest tests/ -v
+source .venv/bin/activate
+pytest -q
 ```
 
 ### Run Specific Test File
 
 ```bash
-uv run pytest tests/test_orchestrator.py -v
+source .venv/bin/activate
+pytest -q tests/test_orchestrator.py
 ```
 
 ### Run Tests with Coverage
 
 ```bash
-uv run pytest tests/ --cov=brad --cov-report=term-missing
+source .venv/bin/activate
+pytest -q --cov=brad --cov-report=term-missing
 ```
 
 ### Generate HTML Coverage Report
 
 ```bash
-uv run pytest tests/ --cov=brad --cov-report=html
+source .venv/bin/activate
+pytest -q --cov=brad --cov-report=html
 # Open htmlcov/index.html in your browser
 ```
 
 ### Run Tests in Watch Mode
 
 ```bash
-uv run pytest-watch tests/
+source .venv/bin/activate
+pytest-watch tests/
 ```
 
 ### Test Guidelines
@@ -281,8 +288,11 @@ uv run flake8 brad/ tests/
 uv run mypy brad/
 
 # Run tests
-uv run pytest tests/ -v
+source .venv/bin/activate
+pytest -q
 ```
+
+If you add frontend/UI/TypeScript code, run the repo's npm-based verification command (for example `npm run prepare-commit`) rather than pnpm unless a repo file explicitly says otherwise.
 
 ### Style Guidelines
 
@@ -363,7 +373,8 @@ git rebase upstream/main
 uv run black brad/ tests/
 uv run flake8 brad/ tests/
 uv run mypy brad/
-uv run pytest tests/ -v
+source .venv/bin/activate
+pytest -q
 ```
 
 3. **Update documentation** if needed:

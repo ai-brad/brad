@@ -252,12 +252,13 @@ uv sync --extra test
 
 Run the test suite with:
 ```bash
+source .venv/bin/activate
+
 # Run all tests
-uv run pytest tests/ -v
+pytest -q
 
 # Run with coverage report
-uv sync --extra test
-uv run pytest tests/ --cov=brad --cov-report=html
+pytest -q --cov=brad --cov-report=html
 
 # View coverage report
 open htmlcov/index.html  # macOS
