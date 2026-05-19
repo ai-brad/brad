@@ -159,6 +159,9 @@ class GitHubAdapter(CodeRepositoryAdapter):
 
     def get_brad_prs(self) -> List[Dict]:
         """Get all open PRs created by Brad (prefix 'Brad: ')."""
+        if db.is_brad_stopped():
+            self.logger.info("Brad is stopped; skipping PR discovery")
+            return []
         self.logger.debug("Fetching Brad's PRs")
         try:
             resp = self._request_with_retry(
@@ -310,6 +313,9 @@ class GitHubAdapter(CodeRepositoryAdapter):
         - The LAST reply is ONLY "Brad reaction: checking..." AND this PR belongs to Brad AND there's no ongoing work
           (indicating Brad was interrupted and should resume)
         """
+        if db.is_brad_stopped():
+            self.logger.info("Brad is stopped; skipping review comment lookup")
+            return []
         self.logger.debug(f"Checking PR #{pr_number} for unresponded review comments")
         try:
             all_comments = self.fetch_review_comments(pr_number)
@@ -436,6 +442,9 @@ class GitHubAdapter(CodeRepositoryAdapter):
         top-level comment when threading fails, which manifests as "replies
         never appear" on the PR.
         """
+        if db.is_brad_stopped():
+            self.logger.info("Brad is stopped; skipping issue comment lookup")
+            return []
         self.logger.info(f"Replying to comment {comment_id} on PR #{pr_number}")
         try:
             source_comment = self._find_review_comment(pr_number, comment_id)

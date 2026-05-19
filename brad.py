@@ -126,6 +126,10 @@ Examples:
                 loop_interval = int(os.environ.get("LOOP_INTERVAL", "300"))
                 logger.info(f"Starting loop mode (interval: {loop_interval}s)")
                 while True:
+                    if db.is_brad_stopped():
+                        logger.info("Brad is stopped; skipping this loop iteration")
+                        time.sleep(loop_interval)
+                        continue
                     try:
                         orchestrator.run_once()
                     except KeyboardInterrupt:
@@ -135,6 +139,9 @@ Examples:
                     logger.info(f"Loop: sleeping {loop_interval}s")
                     time.sleep(loop_interval)
             else:
+                if db.is_brad_stopped():
+                    logger.info("Brad is stopped; nothing to do")
+                    return
                 orchestrator.run_once()
 
         logger.info("Brad completed successfully")

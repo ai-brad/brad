@@ -2,6 +2,7 @@
 import requests
 import time
 from typing import List, Dict, Optional
+from brad import db
 from brad.adapters.ci_cd.base import CICDAdapter, CIResult, DeploymentInfo
 from brad.github_auth import build_github_token_provider
 from brad.logging_config import get_logger
@@ -41,6 +42,9 @@ class GitHubActionsAdapter(CICDAdapter):
         iteration = 0
 
         while True:
+            if db.is_brad_stopped():
+                self.logger.info(f"Stop requested; aborting CI wait for PR #{pr_number}")
+                raise KeyboardInterrupt()
             iteration += 1
             elapsed = time.time() - start_time
 
@@ -89,6 +93,9 @@ class GitHubActionsAdapter(CICDAdapter):
         )
 
         for attempt in range(1, max_attempts + 1):
+            if db.is_brad_stopped():
+                self.logger.info(f"Stop requested; aborting deployment health check for {deploy_info.environment}")
+                raise KeyboardInterrupt()
             try:
                 version_resp = requests.get(deploy_info.api_version_url, timeout=10)
                 config_resp = requests.get(deploy_info.api_config_url, timeout=10)

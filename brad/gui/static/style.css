@@ -180,6 +180,7 @@ body {
 .badge-completed { background: #f0fff4; color: var(--brad-success); }
 .badge-error { background: #fff5f5; color: var(--brad-error); }
 .badge-stuck { background: #fffff0; color: var(--brad-warning); }
+.badge-stopped { background: #fff5e6; color: #b7791f; }
 .badge-merged { background: #f5f0ff; color: var(--brad-merged); }
 
 /* ==================== Status indicator ==================== */
@@ -197,6 +198,11 @@ body {
     border: 1px solid #c6f6d5;
 }
 
+.status-box.stopped {
+    background: #fffaf0;
+    border: 1px solid #f6ad55;
+}
+
 .status-box.active {
     background: #ebf8ff;
     border: 1px solid #bee3f8;
@@ -210,6 +216,7 @@ body {
 }
 
 .status-dot.idle { background: var(--brad-success); }
+.status-dot.stopped { background: #dd6b20; }
 .status-dot.active { background: var(--brad-running); animation: pulse 1.5s infinite; }
 
 @keyframes pulse {
@@ -244,6 +251,46 @@ body {
     color: var(--brad-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+}
+
+/* ==================== Control form ==================== */
+.control-form {
+    display: grid;
+    gap: 0.75rem;
+    margin-top: 1rem;
+}
+
+.control-form input[type="text"] {
+    width: 100%;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--brad-border);
+    border-radius: 6px;
+    font-size: 0.95rem;
+}
+
+.control-actions {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.danger-button,
+.secondary-button {
+    border: 0;
+    border-radius: 6px;
+    padding: 0.7rem 1rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.danger-button {
+    background: #c53030;
+    color: #fff;
+}
+
+.secondary-button {
+    background: #edf2f7;
+    color: var(--brad-text);
 }
 
 /* ==================== Table ==================== */

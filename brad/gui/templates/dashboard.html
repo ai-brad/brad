@@ -3,6 +3,37 @@
 
 {% block content %}
 
+<div class="card" id="control-card">
+    <h2>Brad Control</h2>
+    <div class="status-box {% if control.state == 'stopped' %}stopped{% else %}idle{% endif %}" id="control-status-box">
+        <span class="status-dot {% if control.state == 'stopped' %}stopped{% else %}idle{% endif %}" id="control-status-dot"></span>
+        <div id="control-status-text">
+            {% if control.state == 'stopped' %}
+            <strong>Brad is stopped</strong>
+            {% if control.reason %} — {{ control.reason }}{% endif %}
+            {% else %}
+            <strong>Brad is running</strong> — New work will be processed normally
+            {% endif %}
+            <br>
+            <small>State: <span class="badge badge-{{ control.state }}" id="control-state-badge">{{ control.state|upper }}</span></small>
+            {% if control.updated_at %}
+            <small> · Updated: <span data-utc="{{ control.updated_at }}">{{ control.updated_at }}</span></small>
+            {% endif %}
+            {% if control.updated_by %}
+            <br><small>Updated by: {{ control.updated_by }}</small>
+            {% endif %}
+        </div>
+    </div>
+    <form class="control-form" method="post" action="/api/control/stop">
+        <label for="control-reason"><strong>Stop reason</strong> <small>(optional)</small></label>
+        <input id="control-reason" name="reason" type="text" placeholder="Pause Brad immediately" maxlength="200">
+        <div class="control-actions">
+            <button type="submit" class="danger-button">Stop Brad</button>
+            <button type="submit" formaction="/api/control/resume" class="secondary-button">Resume Brad</button>
+        </div>
+    </form>
+</div>
+
 <div class="card" id="status-card">
     <h2>Backend Status</h2>
     {% if running %}
@@ -110,12 +141,18 @@ function fmtCost(n) { return '$' + (n || 0).toFixed(2); }
 function fmtCost4(n) { return '$' + (n || 0).toFixed(4); }
 function truncate(s, n) { return s && s.length > n ? s.substring(0, n) + '…' : (s || ''); }
 function executionHref(ex) { return '/execution/' + ex.id; }
+function escapeHtml(s) {
+    return (s || '').replace(/[&<>"']/g, function(ch) {
+        return ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[ch];
+    });
+}
 
 function badgeClass(status) {
     if (status === 'completed') return 'badge-completed';
     if (status === 'running') return 'badge-running';
     if (status === 'error') return 'badge-error';
     if (status === 'stuck') return 'badge-stuck';
+    if (status === 'stopped') return 'badge-stopped';
     return 'badge-running';
 }
 
@@ -123,6 +160,15 @@ function executionStatusLabel(status) {
     if (!status) return '';
     if (status === 'completed') return 'DONE';
     return status.toUpperCase();
+}
+
+function controlStatusClass(state) {
+    return state === 'stopped' ? 'stopped' : 'idle';
+}
+
+function controlStatusLabel(state) {
+    if (!state) return '';
+    return state.toUpperCase();
 }
 
 function wireExecutionTableClicks(tbody) {
@@ -156,6 +202,26 @@ function refreshDashboard() {
             document.getElementById('stat-cached-prompt-tokens').textContent = fmtNum(data.totals.total_cached_prompt_tokens);
             document.getElementById('stat-completion-tokens').textContent = fmtNum(data.totals.total_completion_tokens);
             document.getElementById('stat-cost').textContent = fmtCost(data.totals.total_cost);
+
+            var control = data.control || {};
+            var controlBox = document.getElementById('control-status-box');
+            var controlDot = document.getElementById('control-status-dot');
+            var controlText = document.getElementById('control-status-text');
+            var controlBadge = document.getElementById('control-state-badge');
+            if (controlBox && controlDot && controlText && controlBadge) {
+                controlBox.className = 'status-box ' + controlStatusClass(control.state);
+                controlDot.className = 'status-dot ' + controlStatusClass(control.state);
+                controlText.innerHTML = control.state === 'stopped'
+                    ? '<strong>Brad is stopped</strong>' + (control.reason ? ' — ' + escapeHtml(control.reason) : '') +
+                      '<br><small>State: <span class="badge badge-stopped" id="control-state-badge">STOPPED</span></small>' +
+                      (control.updated_at ? ' <small>· Updated: ' + fmtLocalTime(control.updated_at) + '</small>' : '') +
+                      (control.updated_by ? '<br><small>Updated by: ' + escapeHtml(control.updated_by) + '</small>' : '')
+                    : '<strong>Brad is running</strong> — New work will be processed normally' +
+                      '<br><small>State: <span class="badge badge-running" id="control-state-badge">RUNNING</span></small>' +
+                      (control.updated_at ? ' <small>· Updated: ' + fmtLocalTime(control.updated_at) + '</small>' : '') +
+                      (control.updated_by ? '<br><small>Updated by: ' + escapeHtml(control.updated_by) + '</small>' : '');
+                controlBadge = document.getElementById('control-state-badge');
+            }
 
             // Update status card
             var sc = document.getElementById('status-card');

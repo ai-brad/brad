@@ -153,6 +153,19 @@ class BradOrchestrator:
         db.update_execution_phase(state.execution_id, phase, detail)
         self.logger.info(f"{state.issue_key}: Phase → {phase}" + (f" ({detail})" if detail else ""))
 
+    def _stop_requested(self) -> bool:
+        try:
+            result = db.is_brad_stopped()
+            return result if isinstance(result, bool) else False
+        except Exception as e:
+            self.logger.debug(f"Could not read Brad control state: {e}")
+            return False
+
+    def _raise_if_stopped(self) -> None:
+        if self._stop_requested():
+            self.logger.info("Brad stop requested; aborting current work")
+            raise KeyboardInterrupt()
+
     def _check_cost_budget(self, state: IssueState) -> bool:
         """Check if execution has exceeded its cost budget. Returns True if over budget."""
         current_cost = db.get_execution_cost(state.execution_id)
@@ -222,6 +235,10 @@ class BradOrchestrator:
         self.logger.info("=" * 80)
 
         try:
+            if self._stop_requested():
+                self.logger.info("Brad is stopped; skipping run")
+                return
+
             # Rebase any open Brad PRs that are behind main
             self.logger.info("Rebasing open Brad PRs...")
             try:
@@ -237,6 +254,9 @@ class BradOrchestrator:
                 self.logger.error(f"Failed to process review comments: {e}")
 
             # Then fetch issues with BradReview label
+            if self._stop_requested():
+                self.logger.info("Brad is stopped; skipping issue fetch")
+                return
             issues = self.ticketing.fetch_issues_with_label("BradReview")
 
             if not issues:
@@ -246,6 +266,9 @@ class BradOrchestrator:
             self.logger.info(f"Processing {len(issues)} issues")
 
             for issue in issues:
+                if self._stop_requested():
+                    self.logger.info("Brad stop requested; skipping remaining issues")
+                    break
                 try:
                     self._process_issue(issue)
                 except Exception as e:
@@ -267,6 +290,9 @@ class BradOrchestrator:
 
     def _rebase_open_prs(self):
         """Rebase all open Brad PRs that are behind main, skipping those with conflicts."""
+        if self._stop_requested():
+            self.logger.info("Brad is stopped; skipping PR rebase pass")
+            return
         brad_prs = self.code_repo.get_brad_prs()
         if not brad_prs:
             self.logger.info("No open Brad PRs to rebase")
@@ -283,6 +309,13 @@ class BradOrchestrator:
 
         self.logger.info(f"Checking {len(brad_prs)} Brad PRs for rebase")
         for pr in brad_prs:
+            if self._stop_requested():
+                self.logger.info("Brad stop requested; aborting rebase pass")
+                try:
+                    self.repo.abort_rebase()
+                except Exception:
+                    pass
+                return
             pr_number = pr['number']
             branch_name = pr.get('head', {}).get('ref', '')
 
@@ -384,6 +417,11 @@ class BradOrchestrator:
         """
         from brad import conflict_context as cc
 
+        if self._stop_requested():
+            self.logger.info(f"PR #{pr_number}: stop requested before rebase conflict resolution")
+            self.repo.abort_rebase()
+            return
+
         if len(conflicted_files) > self.MAX_CONFLICT_FILES:
             self.logger.warning(
                 f"PR #{pr_number}: {len(conflicted_files)} conflicted files exceeds "
@@ -415,6 +453,10 @@ class BradOrchestrator:
         current_files = list(conflicted_files)
 
         for iteration in range(1, self.MAX_CONFLICT_ITERATIONS + 1):
+            if self._stop_requested():
+                self.logger.info(f"PR #{pr_number}: stop requested during rebase conflict resolution")
+                self.repo.abort_rebase()
+                return
             ctx = cc.gather_context(
                 repo=self.repo,
                 branch_name=branch_name,
@@ -488,6 +530,10 @@ class BradOrchestrator:
                 return
 
             # Verify the agent did its job before continuing the rebase.
+            if self._stop_requested():
+                self.logger.info(f"PR #{pr_number}: stop requested before continuing rebase")
+                self.repo.abort_rebase()
+                return
             still_marked = self._files_still_have_conflict_markers(current_files)
             if still_marked:
                 self.logger.warning(
@@ -722,11 +768,17 @@ class BradOrchestrator:
 
     def _process_review_comments(self):
         """Check all Brad PRs for new review comments (both file-level and PR-level) and process them."""
+        if self._stop_requested():
+            self.logger.info("Brad is stopped; skipping review comment processing")
+            return
         brad_prs = self.code_repo.get_brad_prs()
         if not brad_prs:
             return
 
         for pr in brad_prs:
+            if self._stop_requested():
+                self.logger.info("Brad stop requested; aborting review comment processing")
+                return
             pr_number = pr['number']
             branch_name = pr['head']['ref']
 
@@ -1085,6 +1137,9 @@ class BradOrchestrator:
         to comments, pushes a fix, and then walks away even if the new commit
         breaks the pipeline.
         """
+        if self._stop_requested():
+            self.logger.info(f"PR #{pr_number}: stop requested before CI watch")
+            return
         # Brad's branches are named after the Jira issue key, so this is a
         # sensible default. If the convention ever changes this still works
         # for traceability — Jira just won't recognize the comment target.
@@ -1142,6 +1197,9 @@ class BradOrchestrator:
 
     def _process_issue(self, issue: Dict):
         """Process a single issue through the Brad workflow."""
+        if self._stop_requested():
+            self.logger.info("Brad is stopped; skipping issue processing")
+            return
         issue_key = issue["key"]
         fields = issue.get("fields", {})
         summary = fields.get("summary", "N/A")
@@ -1219,6 +1277,9 @@ class BradOrchestrator:
             # Step 5: Detect existing PR — continue on it instead of restarting.
             # To force a fresh start, use BradScrapExisting label instead of manual intervention.
             self._set_phase(state, "checking_existing_pr", "Checking for existing PR to continue")
+            if self._stop_requested():
+                self.logger.info(f"{issue_key}: stop requested before PR lookup")
+                return
             existing_pr = self.code_repo.pr_exists_for_branch(branch_name)
             if existing_pr:
                 self.logger.info(f"{issue_key}: Continuing work on existing PR #{existing_pr}")
@@ -1294,6 +1355,12 @@ class BradOrchestrator:
 
     def _handle_implementation_phase(self, state: IssueState, existing_pr: Optional[int] = None):
         """Handle implementation phase — impl → local review loop → then create PR → CI."""
+        if self._stop_requested():
+            self.logger.info(f"{state.issue_key}: stop requested before implementation")
+            return
+        if self._stop_requested():
+            self.logger.info(f"{state.issue_key}: stop requested before implementation")
+            return
         self._set_phase(state, "implementing", "Writing code and tests")
         self.ticketing.comment(state.issue_key, f"Brad is starting implementation for {state.issue_key}...")
 
@@ -1346,10 +1413,16 @@ class BradOrchestrator:
 
         # Implementation succeeded — run local review BEFORE creating PR
         self._set_phase(state, "local_review", "Reviewing code locally before creating PR")
+        if self._stop_requested():
+            self.logger.info(f"{state.issue_key}: stop requested before local review")
+            return
         self.ticketing.comment(state.issue_key, "Implementation complete. Running local code review before creating PR...")
         local_review_passed = self._run_local_review_loop(state)
 
         # Always verify/create PR and persist to DB (even if budget is tight)
+        if self._stop_requested():
+            self.logger.info(f"{state.issue_key}: stop requested before PR creation")
+            return
         self._set_phase(state, "creating_pr", "Pushing code and creating pull request")
         verified_pr = self._verify_and_ensure_pr(state, response.get("pr_number"), response.get("pr_url"))
         if verified_pr:
@@ -1398,6 +1471,8 @@ class BradOrchestrator:
 
     def _run_local_review_loop(self, state: IssueState) -> bool:
         """Run impl → local review → fix loop. Returns True if review passed."""
+        if self._stop_requested():
+            return False
         review_result = self._handle_local_review(state)
 
         if review_result.get("action") == "approved":
@@ -1466,6 +1541,8 @@ class BradOrchestrator:
 
     def _handle_local_review(self, state: IssueState) -> Dict:
         """Run a fresh-context local review and return its structured outcome."""
+        if self._stop_requested():
+            return {"action": "stuck", "message": "Brad stopped by operator"}
         self._set_phase(state, "local_review", "Running automated code review")
         step_id = db.create_step(state.execution_id, "local_review", "Generating diff and reviewing")
         try:
@@ -1508,6 +1585,8 @@ class BradOrchestrator:
 
     def _handle_local_review_fix(self, state: IssueState, review_feedback: str) -> bool:
         """Address local review feedback and rerun local review before CI."""
+        if self._stop_requested():
+            return False
         self._set_phase(state, "local_review_fix", f"Addressing review feedback (attempt {state.local_review_fix_count + 1})")
         if state.local_review_fix_count >= self.cfg.max_review_fix_iterations:
             self.ticketing.comment(
@@ -1575,6 +1654,9 @@ class BradOrchestrator:
 
     def _handle_ci_monitoring(self, state: IssueState):
         """Monitor CI/CD pipeline and check for review comments."""
+        if self._stop_requested():
+            self.logger.info(f"{state.issue_key}: stop requested before CI monitoring")
+            return
         pr_number = state.pr_number
         if pr_number is None:
             self.logger.error(f"{state.issue_key}: Cannot monitor CI - no PR number")
@@ -1602,6 +1684,10 @@ class BradOrchestrator:
             if self.cfg.deployment_health_check and deploy_info:
                 self._set_phase(state, "deployment_health_check", "Checking deployment health")
                 deployment_summary = self._check_deployment_after_ci(state, deploy_info)
+
+            if self._stop_requested():
+                self.logger.info(f"{state.issue_key}: stop requested after CI passed")
+                return
 
             # Check for review comments (allow windsurf-bot, filter other bots)
             all_review_comments = self.code_repo.fetch_review_comments(pr_number)
@@ -1715,6 +1801,8 @@ class BradOrchestrator:
 
     def _handle_ci_fix(self, state: IssueState, ci_result):
         """Handle CI failure by invoking AI agent to fix issues."""
+        if self._stop_requested():
+            return
         pr_number = state.pr_number
         if pr_number is None:
             self.logger.error(f"{state.issue_key}: Cannot fix CI - no PR number")
@@ -1759,6 +1847,8 @@ class BradOrchestrator:
                 state.issue_key,
                 f"Brad attempted to fix CI failures (attempt {state.ci_fix_count}):\n\n{message}\n\nWaiting for CI to re-run..."
             )
+            if self._stop_requested():
+                return
             time.sleep(30)
             self._handle_ci_monitoring(state)
         elif action == "stuck":
@@ -1774,6 +1864,8 @@ class BradOrchestrator:
 
     def _handle_review_fix(self, state: IssueState, review_comments):
         """Handle PR review comments."""
+        if self._stop_requested():
+            return
         pr_number = state.pr_number
         if pr_number is None:
             self.logger.error(f"{state.issue_key}: Cannot address review comments - no PR number")
@@ -1822,6 +1914,8 @@ class BradOrchestrator:
                 state.issue_key,
                 f"Brad addressed review comments (attempt {state.review_fix_count}):\n\n{message}\n\nWaiting for CI to re-run..."
             )
+            if self._stop_requested():
+                return
             time.sleep(30)
             self._handle_ci_monitoring(state)
         elif action == "stuck":

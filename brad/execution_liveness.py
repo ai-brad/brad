@@ -107,38 +107,58 @@ class ExecutionLivenessTracker:
         )
 
     def mark_active_failed(self, reason: str) -> int:
+        return self.mark_active_terminated("failed", reason)
+
+    def mark_active_stopped(self, reason: str) -> int:
+        return self.mark_active_terminated("stopped", reason)
+
+    def mark_active_terminated(self, status: str, reason: str) -> int:
         with self._lock:
             execution_ids = list(self._active_order)
 
         failed = 0
         for execution_id in execution_ids:
             try:
-                db.update_execution_phase(execution_id, "interrupted", reason[:200])
-                db.finish_execution(execution_id, status="failed", error_message=reason[:500])
+                phase = "stopped" if status == "stopped" else "interrupted"
+                db.update_execution_phase(execution_id, phase, reason[:200])
+                db.finish_execution(execution_id, status=status, error_message=reason[:500])
                 failed += 1
             except Exception as exc:
                 self.logger.error(
-                    "Could not mark execution #%s failed during shutdown: %s",
+                    "Could not mark execution #%s %s during shutdown: %s",
                     execution_id,
+                    status,
                     exc,
                 )
         return failed
 
     def _handle_sigterm(self, signum, frame) -> None:
         reason = "Worker interrupted by service stop signal"
-        failed = self.mark_active_failed(reason)
+        if db.is_brad_stopped():
+            failed = self.mark_active_stopped(reason)
+            status_label = "stopped"
+        else:
+            failed = self.mark_active_failed(reason)
+            status_label = "failed"
         self.logger.warning(
-            "Received SIGTERM; marked %d active execution(s) failed before exit",
+            "Received SIGTERM; marked %d active execution(s) %s before exit",
             failed,
+            status_label,
         )
         raise KeyboardInterrupt()
 
     def _handle_sigint(self, signum, frame) -> None:
         reason = "Worker interrupted by operator"
-        failed = self.mark_active_failed(reason)
+        if db.is_brad_stopped():
+            failed = self.mark_active_stopped(reason)
+            status_label = "stopped"
+        else:
+            failed = self.mark_active_failed(reason)
+            status_label = "failed"
         self.logger.warning(
-            "Received SIGINT; marked %d active execution(s) failed before exit",
+            "Received SIGINT; marked %d active execution(s) %s before exit",
             failed,
+            status_label,
         )
         raise KeyboardInterrupt()
 

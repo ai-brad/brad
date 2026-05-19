@@ -1,9 +1,10 @@
 """Brad Web GUI — read-only Flask dashboard for execution history and costs."""
 import os
 import re
+import signal
 from typing import Callable, Optional
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request, redirect, url_for
 from brad import db
 from brad.github_auth import build_github_token_provider_from_env
 from brad.logging_config import get_logger
@@ -36,7 +37,16 @@ def format_execution_status_label(status: Optional[str]) -> str:
         return ""
     if status.lower() == "completed":
         return "DONE"
+    if status.lower() == "stopped":
+        return "STOPPED"
     return status.upper()
+
+
+def format_control_status_label(state: Optional[str]) -> str:
+    state = (state or "").strip().lower()
+    if not state:
+        return ""
+    return state.upper()
 
 
 def format_execution_action(execution) -> str:
@@ -248,17 +258,36 @@ def create_app(db_path: str = None) -> Flask:
     def inject_globals():
         return {"jira_url": jira_url, "github_repo": github_repo}
 
+    def _render_dashboard_redirect():
+        return redirect(request.referrer or url_for("dashboard"))
+
+    def _maybe_kill_worker():
+        running = db.get_running_execution()
+        if not running:
+            return
+        worker_pid = running.get("worker_pid")
+        if not worker_pid:
+            return
+        try:
+            os.kill(int(worker_pid), signal.SIGTERM)
+        except ProcessLookupError:
+            logger.info("Worker PID %s no longer exists", worker_pid)
+        except Exception as exc:
+            logger.warning("Could not signal worker PID %s: %s", worker_pid, exc)
+
     @app.route("/")
     def dashboard():
         running = db.get_running_execution()
         running = decorate_execution(running, issue_title_fetcher) if running else None
         recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
         totals = db.get_total_costs()
+        control = db.get_control_state()
         return render_template(
             "dashboard.html",
             running=running,
             recent=recent,
             totals=totals,
+            control=control,
         )
 
     @app.route("/history")
@@ -292,9 +321,11 @@ def create_app(db_path: str = None) -> Flask:
         running = db.get_running_execution()
         running = decorate_execution(running, issue_title_fetcher) if running else None
         totals = db.get_total_costs()
+        control = db.get_control_state()
         return jsonify({
             "backend_running": running is not None,
             "current_issue": running["issue_key"] if running else None,
+            "brad_state": control["state"],
             "totals": totals,
         })
 
@@ -304,10 +335,12 @@ def create_app(db_path: str = None) -> Flask:
         running = decorate_execution(running, issue_title_fetcher) if running else None
         recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
         totals = db.get_total_costs()
+        control = db.get_control_state()
         return jsonify({
             "running": running,
             "recent": recent,
             "totals": totals,
+            "control": control,
         })
 
     @app.route("/api/executions")
@@ -334,6 +367,31 @@ def create_app(db_path: str = None) -> Flask:
             "ticket_cost_breakdown": ticket_cost_breakdown,
             "failure_context": failure_context,
         })
+
+    @app.route("/api/control", methods=["GET"])
+    def api_control():
+        return jsonify({"control": db.get_control_state()})
+
+    @app.route("/api/control/stop", methods=["POST"])
+    def api_control_stop():
+        payload = request.get_json(silent=True) or {}
+        reason = (request.form.get("reason") or payload.get("reason") or "").strip()
+        updated_by = request.remote_addr or "dashboard"
+        control = db.set_control_state("stopped", reason=reason, updated_by=updated_by)
+        _maybe_kill_worker()
+        if request.is_json:
+            return jsonify({"control": control})
+        return _render_dashboard_redirect()
+
+    @app.route("/api/control/resume", methods=["POST"])
+    def api_control_resume():
+        payload = request.get_json(silent=True) or {}
+        reason = (request.form.get("reason") or payload.get("reason") or "").strip()
+        updated_by = request.remote_addr or "dashboard"
+        control = db.set_control_state("running", reason=reason, updated_by=updated_by)
+        if request.is_json:
+            return jsonify({"control": control})
+        return _render_dashboard_redirect()
 
     @app.route("/api/model-costs")
     def api_model_costs():

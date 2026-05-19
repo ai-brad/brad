@@ -32,6 +32,7 @@ def init_db(db_path: str = "brad_data.db") -> None:
             )
         """)
         _run_migrations(conn)
+        _ensure_control_state(conn)
         _seed_default_model_costs(conn)
     logger.info("Database initialized")
 
@@ -81,6 +82,26 @@ def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _ensure_control_state(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brad_control (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            state TEXT NOT NULL DEFAULT 'running',
+            reason TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO brad_control (id, state, reason, updated_at, updated_by)
+        VALUES (1, 'running', '', '', '')
+        """
+    )
 
 
 def set_execution_runtime_observer(observer) -> None:
@@ -322,6 +343,52 @@ def update_execution_action(execution_id: int, action: str) -> None:
             "UPDATE executions SET action=? WHERE id=?",
             ((action or "").strip(), execution_id),
         )
+
+
+def get_control_state() -> Dict:
+    """Return Brad's global execution control state."""
+    try:
+        with _get_conn() as conn:
+            row = conn.execute("SELECT * FROM brad_control WHERE id = 1").fetchone()
+            if row:
+                return dict(row)
+    except Exception:
+        pass
+    return {
+        "id": 1,
+        "state": "running",
+        "reason": "",
+        "updated_at": "",
+        "updated_by": "",
+    }
+
+
+def is_brad_stopped() -> bool:
+    """True when the global Brad stop switch is enabled."""
+    return (get_control_state().get("state") or "").strip().lower() == "stopped"
+
+
+def set_control_state(state: str, reason: str = "", updated_by: str = "") -> Dict:
+    """Update Brad's global execution control state."""
+    normalized_state = (state or "").strip().lower()
+    if normalized_state not in {"running", "stopped"}:
+        raise ValueError(f"Unknown Brad control state: {state!r}")
+
+    updated_at = _now()
+    with _get_conn() as conn:
+        _ensure_control_state(conn)
+        conn.execute(
+            """
+            UPDATE brad_control
+               SET state=?,
+                   reason=?,
+                   updated_at=?,
+                   updated_by=?
+             WHERE id=1
+            """,
+            (normalized_state, (reason or "").strip(), updated_at, (updated_by or "").strip()),
+        )
+    return get_control_state()
 
 
 def update_execution_phase(execution_id: int, phase: str, detail: str = "") -> None:
@@ -721,6 +788,7 @@ _DEFAULT_MODEL_COSTS = [
     ("gpt-5.2-codex",   0.003,   None,     0.012,  "default"),
     ("gpt-5-codex",     0.00125, None,     0.0100, "default"),
     ("gpt-5.4",         0.0025,  0.00025, 0.015,   "default"),
+    ("gpt-5.4-mini",    0.00075, 0.000075, 0.0045,  "default"),
 ]
 
 _COST_TTL_HOURS = 24
