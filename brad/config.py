@@ -60,6 +60,7 @@ class Config:
 
     log_level: str = "INFO"
     attachments_dir: str = "attachments"
+    ticketing_adapter: str = "jira"
 
     # Agent harness selection — which agentic loop drives the model.
     # See ``brad/adapters/harness`` for available harnesses.
@@ -73,9 +74,14 @@ class Config:
     # ``codex_model`` is intentionally optional: when unset, the CodexCliHarness
     # omits ``--model`` so codex falls back to whatever is in ~/.codex/config.toml
     # (model + model_provider + auth). Set CODEX_MODEL only to override.
+    # ``codex_summarization_model`` is reserved for compact/summarize flows and
+    # defaults to ``codex_model`` when unset.
     codex_bin: str = "codex"
     codex_model: Optional[str] = None
+    codex_summarization_model: Optional[str] = None
     codex_sandbox: str = "workspace-write"
+    dummy_ticket_path: Optional[str] = None
+    dummy_ticket_log_path: Optional[str] = None
     # ``danger`` => --dangerously-bypass-approvals-and-sandbox.  Required because
     # the implementation prompt asks the agent to push branches and open PRs,
     # both of which need network + .git writes that --full-auto blocks.
@@ -95,6 +101,8 @@ def load_config() -> Config:
     deployments_raw = os.environ.get("AZURE_DEPLOYMENTS", "")
     deployments = [d.strip() for d in deployments_raw.split(",") if d.strip()] if deployments_raw else []
 
+    ticketing_adapter = os.environ.get("BRAD_TICKETING", "jira").strip().lower()
+
     github_repo = os.environ["GITHUB_REPO"]
     github_token = os.environ.get("GITHUB_TOKEN", "")
     github_app_id = os.environ.get("GITHUB_APP_ID") or None
@@ -111,14 +119,15 @@ def load_config() -> Config:
         if login.strip()
     ]
 
-    has_github_app_auth = bool(
-        github_app_id and github_app_installation_id and (github_app_private_key or github_app_private_key_path)
-    )
-    if not github_token and not has_github_app_auth:
-        raise KeyError(
-            "Set GITHUB_TOKEN or GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + "
-            "GITHUB_APP_PRIVATE_KEY[_PATH]."
+    if ticketing_adapter == "jira":
+        has_github_app_auth = bool(
+            github_app_id and github_app_installation_id and (github_app_private_key or github_app_private_key_path)
         )
+        if not github_token and not has_github_app_auth:
+            raise KeyError(
+                "Set GITHUB_TOKEN or GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + "
+                "GITHUB_APP_PRIVATE_KEY[_PATH]."
+            )
 
     workspace_dir = os.environ.get(
         "BRAD_WORKSPACE_DIR",
@@ -131,11 +140,16 @@ def load_config() -> Config:
         Path(workspace_dir) / github_repo.replace("/", "-")
     )
 
+    jira_url = os.environ.get("JIRA_URL", "")
+    jira_token = os.environ.get("JIRA_TOKEN", "")
+    jira_user = os.environ.get("JIRA_USER", "")
+    jira_project_key = os.environ.get("JIRA_PROJECT_KEY", "DEV")
+
     return Config(
-        jira_url=os.environ["JIRA_URL"],
-        jira_token=os.environ["JIRA_TOKEN"],
-        jira_user=os.environ["JIRA_USER"],
-        jira_project_key=os.environ.get("JIRA_PROJECT_KEY", "DEV"),
+        jira_url=jira_url,
+        jira_token=jira_token,
+        jira_user=jira_user,
+        jira_project_key=jira_project_key,
 
         github_token=github_token,
         github_repo=github_repo,
@@ -176,13 +190,17 @@ def load_config() -> Config:
 
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         attachments_dir=os.environ.get("ATTACHMENTS_DIR", str(Path.cwd() / "attachments")),
+        ticketing_adapter=ticketing_adapter,
 
         harness=os.environ.get("BRAD_HARNESS", "brad"),
         llm_provider=os.environ.get("BRAD_LLM_PROVIDER", "azure_openai"),
 
         codex_bin=os.environ.get("CODEX_BIN", "codex"),
         codex_model=os.environ.get("CODEX_MODEL") or None,
+        codex_summarization_model=os.environ.get("CODEX_SUMMARIZATION_MODEL") or None,
         codex_sandbox=os.environ.get("CODEX_SANDBOX", "workspace-write"),
+        dummy_ticket_path=os.environ.get("BRAD_DUMMY_TICKET_PATH") or None,
+        dummy_ticket_log_path=os.environ.get("BRAD_DUMMY_TICKET_LOG_PATH") or None,
         codex_approval=os.environ.get("CODEX_APPROVAL", "danger"),
         codex_timeout=int(os.environ.get("CODEX_TIMEOUT", "3600")),
     )

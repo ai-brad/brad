@@ -182,6 +182,25 @@ def build_ticket_cost_breakdown(issue_key: str):
     return rows
 
 
+def build_execution_continuation_summary(execution):
+    """Return restart-summary metadata for display on the execution page."""
+    execution = execution or {}
+    summary = (execution.get("continuation_summary") or "").strip()
+    if not summary:
+        return None
+    return {
+        "summary": summary,
+        "source": (execution.get("continuation_summary_source") or "").strip(),
+        "model_name": (execution.get("continuation_summary_model_name") or "").strip(),
+        "prompt_tokens": int(execution.get("continuation_summary_prompt_tokens") or 0),
+        "cached_prompt_tokens": int(execution.get("continuation_summary_cached_prompt_tokens") or 0),
+        "completion_tokens": int(execution.get("continuation_summary_completion_tokens") or 0),
+        "total_tokens": int(execution.get("continuation_summary_total_tokens") or 0),
+        "cost": float(execution.get("continuation_summary_cost") or 0.0),
+        "updated_at": (execution.get("continuation_summary_updated_at") or "").strip(),
+    }
+
+
 def build_execution_failure_context(execution, steps):
     """Surface the most actionable failure context for a stuck/failed execution."""
     execution = execution or {}
@@ -297,6 +316,7 @@ def create_app(db_path: str = None) -> Flask:
         ci_runs = db.get_execution_ci_runs(execution_id)
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
         ticket_cost_breakdown = build_ticket_cost_breakdown(execution.get("issue_key"))
+        continuation_summary = build_execution_continuation_summary(execution)
         failure_context = build_execution_failure_context(execution, steps)
         issue_control = db.get_issue_control_state(execution.get("issue_key"))
         return render_template(
@@ -306,6 +326,7 @@ def create_app(db_path: str = None) -> Flask:
             ci_runs=ci_runs,
             cost_breakdown=cost_breakdown,
             ticket_cost_breakdown=ticket_cost_breakdown,
+            continuation_summary=continuation_summary,
             failure_context=failure_context,
             issue_control=issue_control,
         )
@@ -348,6 +369,7 @@ def create_app(db_path: str = None) -> Flask:
         ci_runs = db.get_execution_ci_runs(execution_id)
         cost_breakdown = build_execution_cost_breakdown(execution, steps)
         ticket_cost_breakdown = build_ticket_cost_breakdown(execution.get("issue_key"))
+        continuation_summary = build_execution_continuation_summary(execution)
         failure_context = build_execution_failure_context(execution, steps)
         issue_control = db.get_issue_control_state(execution.get("issue_key"))
         return jsonify({
@@ -356,6 +378,7 @@ def create_app(db_path: str = None) -> Flask:
             "ci_runs": ci_runs,
             "cost_breakdown": cost_breakdown,
             "ticket_cost_breakdown": ticket_cost_breakdown,
+            "continuation_summary": continuation_summary,
             "failure_context": failure_context,
             "issue_control": issue_control,
         })

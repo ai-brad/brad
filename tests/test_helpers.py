@@ -17,6 +17,8 @@ def make_test_config(tmp_path, **overrides):
         azure_openai_endpoint="https://test.openai.azure.com/openai/responses?api-version=2025-04-01-preview",
         azure_openai_api_key="test-key",
         azure_openai_model="gpt-4o",
+        codex_model=None,
+        codex_summarization_model=None,
         max_clarification_cycles=3,
         max_ci_fix_iterations=5,
         max_review_fix_iterations=3,
@@ -40,6 +42,9 @@ def make_test_config(tmp_path, **overrides):
         db_path=str(tmp_path / "test_brad.db"),
         log_level="INFO",
         attachments_dir=str(tmp_path / "attachments"),
+        ticketing_adapter="jira",
+        dummy_ticket_path=None,
+        dummy_ticket_log_path=None,
     )
     defaults.update(overrides)
     return Config(**defaults)

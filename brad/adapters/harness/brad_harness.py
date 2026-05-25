@@ -177,7 +177,6 @@ class BradHarness(AgentHarness):
         task_prompt: str,
         repo_path: str,
         system_prompt: str = "",
-        previous_response_id: Optional[str] = None,
     ) -> LLMResult:
         """Run an agentic task. Returns LLMResult with text, response_id, and usage."""
         self.logger.info(f"=== BradHarness task start in {repo_path} ===")
@@ -191,20 +190,17 @@ class BradHarness(AgentHarness):
             input_messages.append({"role": "developer", "content": system_prompt})
         input_messages.append({"role": "user", "content": task_prompt})
 
-        prev_id = previous_response_id
         iteration = 0
 
         while iteration < self.max_iterations:
             iteration += 1
             self.logger.info(f"--- Iteration {iteration}/{self.max_iterations} ---")
 
-            api_resp = self.provider.call(
-                input_messages, self.TOOL_DEFINITIONS, previous_response_id=prev_id
-            )
+            api_resp = self.provider.call(input_messages, self.TOOL_DEFINITIONS)
             if api_resp is None:
                 return LLMResult(
                     text="ERROR: LLM provider call failed — check logs for details.",
-                    response_id=prev_id,
+                    response_id=None,
                     usage=total_usage,
                 )
 
@@ -215,10 +211,9 @@ class BradHarness(AgentHarness):
                 total_usage.total_tokens = total_usage.prompt_tokens + total_usage.completion_tokens
                 total_usage.cached_tokens += api_resp.usage.cached_tokens
 
-            prev_id = api_resp.response_id
             output_items = api_resp.output
             self.logger.info(
-                f"Response id={prev_id}, status={api_resp.status}, items={len(output_items)}"
+                f"Response id={api_resp.response_id}, status={api_resp.status}, items={len(output_items)}"
             )
 
             # Separate tool calls from text.
@@ -245,7 +240,7 @@ class BradHarness(AgentHarness):
                     f"Total usage: prompt={total_usage.prompt_tokens}, "
                     f"completion={total_usage.completion_tokens}"
                 )
-                return LLMResult(text=final, response_id=prev_id, usage=total_usage)
+                return LLMResult(text=final, response_id=api_resp.response_id, usage=total_usage)
 
             # Execute every tool call, build the next input.
             input_messages = []
@@ -274,7 +269,7 @@ class BradHarness(AgentHarness):
         self.logger.error(f"Agent hit max iterations ({self.max_iterations})")
         return LLMResult(
             text="ERROR: Agent exceeded maximum iteration limit.",
-            response_id=prev_id,
+            response_id=api_resp.response_id,
             usage=total_usage,
         )
 

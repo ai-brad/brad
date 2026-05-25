@@ -21,6 +21,8 @@ def test_load_config_with_required_vars(monkeypatch):
     assert cfg.github_repo == "owner/repo"
     assert cfg.target_repo_path == "/fake/repo"
     assert cfg.azure_openai_model == "gpt-4o"  # default
+    assert cfg.codex_summarization_model is None
+    assert cfg.ticketing_adapter == "jira"
 
 
 def test_load_config_with_defaults(monkeypatch):
@@ -49,6 +51,20 @@ def test_load_config_with_defaults(monkeypatch):
     assert cfg.deployment_log_since == "10m"
 
 
+def test_load_config_with_codex_summary_override(monkeypatch):
+    monkeypatch.setenv("JIRA_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_TOKEN", "test-token")
+    monkeypatch.setenv("JIRA_USER", "test@example.com")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+    monkeypatch.setenv("TARGET_REPO_PATH", "/fake/repo")
+    monkeypatch.setenv("CODEX_SUMMARIZATION_MODEL", "gpt-5.4-mini")
+
+    cfg = load_config()
+
+    assert cfg.codex_summarization_model == "gpt-5.4-mini"
+
+
 def test_load_config_with_custom_values(monkeypatch):
     """Test that custom values override defaults."""
     monkeypatch.setenv("JIRA_URL", "https://test.atlassian.net")
@@ -66,6 +82,24 @@ def test_load_config_with_custom_values(monkeypatch):
     assert cfg.jira_project_key == "CUSTOM"
     assert cfg.max_clarification_cycles == 5
     assert cfg.log_level == "DEBUG"
+
+
+def test_load_config_with_dummy_ticketing(monkeypatch):
+    monkeypatch.setenv("BRAD_TICKETING", "dummy")
+    monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+    monkeypatch.setenv("TARGET_REPO_PATH", "/fake/repo")
+    monkeypatch.delenv("JIRA_URL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+    monkeypatch.delenv("JIRA_USER", raising=False)
+
+    cfg = load_config()
+
+    assert cfg.ticketing_adapter == "dummy"
+    assert cfg.jira_url == ""
+    assert cfg.jira_token == ""
+    assert cfg.jira_user == ""
+    assert cfg.dummy_ticket_path is None
+    assert cfg.dummy_ticket_log_path is None
 
 
 def test_load_config_accepts_github_app_auth_without_pat(monkeypatch, tmp_path):

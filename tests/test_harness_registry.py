@@ -26,6 +26,7 @@ def _cfg(**overrides):
         azure_openai_model="gpt-4o",
         codex_bin="codex",
         codex_model="gpt-5-codex",
+        codex_summarization_model=None,
         codex_sandbox="workspace-write",
         codex_approval="never",
         codex_timeout=60,
@@ -170,7 +171,7 @@ class TestCodexCliHarnessInvocation:
         # JSONL streaming is always on.
         assert "--json" in argv
 
-    def test_resumes_prior_codex_thread_when_previous_response_id_present(self, tmp_path):
+    def test_starts_fresh_exec_without_resume_token(self, tmp_path):
         harness = CodexCliHarness(_cfg(harness="codex"))
         events = ['{"type":"thread.started","thread_id":"thread-123"}\n']
         factory, captured = _patch_popen(stdout_lines=events)
@@ -187,11 +188,10 @@ class TestCodexCliHarnessInvocation:
             result = harness.run(
                 "continue work",
                 str(tmp_path),
-                previous_response_id="thread-previous",
             )
         argv = captured["argv"]
-        assert argv[:4] == ["codex", "exec", "resume", "thread-previous"]
-        assert "--cd" not in argv
+        assert argv[:2] == ["codex", "exec"]
+        assert "--cd" in argv
         assert result.response_id == "thread-123"
 
     def test_simple_direct_prompt_invocation_uses_repo_prompt_without_side_effects(self, tmp_path):
@@ -298,6 +298,53 @@ class TestCodexCliHarnessInvocation:
         ):
             harness = CodexCliHarness(cfg)
         assert harness.model_name == "gpt-5.4"
+
+    def test_summarization_model_defaults_to_main_model(self, tmp_path):
+        harness = CodexCliHarness(_cfg(harness="codex", codex_model="gpt-5.4-mini"))
+        assert harness._resolved_summarization_model_name == "gpt-5.4-mini"
+
+    def test_summarization_model_override_is_resolved(self, tmp_path):
+        harness = CodexCliHarness(
+            _cfg(
+                harness="codex",
+                codex_model="gpt-5.4-mini",
+                codex_summarization_model="gpt-5.4",
+            )
+        )
+        assert harness._resolved_summarization_model_name == "gpt-5.4"
+
+    def test_summarize_context_uses_summarization_model(self, tmp_path):
+        harness = CodexCliHarness(
+            _cfg(
+                harness="codex",
+                codex_model="gpt-5.4-mini",
+                codex_summarization_model="gpt-5.4",
+            )
+        )
+        factory, captured = _patch_popen(last_message="summary output\n")
+        with (
+            patch(
+                "brad.adapters.harness.codex_cli_harness.subprocess.Popen",
+                side_effect=factory,
+            ),
+            patch(
+                "brad.adapters.harness.codex_cli_harness.shutil.which",
+                return_value="/usr/bin/codex",
+            ),
+        ):
+            summary = harness.summarize_context("prior work", str(tmp_path), subject="TEST-1")
+
+        assert summary == "summary output"
+        assert harness._last_summary_usage is not None
+        argv = captured["argv"]
+        assert "--model" in argv
+        assert "gpt-5.4" in argv
+        assert "--sandbox" in argv
+        assert "read-only" in argv
+        prompt_text = captured["proc"].stdin.getvalue()
+        assert "restart handoff" in prompt_text
+        assert "Current state" in prompt_text
+        assert "Files / commands / tests" in prompt_text
 
     def test_passes_model_flag_when_codex_model_set(self, tmp_path):
         harness = CodexCliHarness(_cfg(harness="codex", codex_model="gpt-5.4"))

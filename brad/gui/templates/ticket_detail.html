@@ -88,6 +88,24 @@
     </form>
 </div>
 
+{% if continuation_summary %}
+<div class="card" id="continuation-summary-card">
+    <h2>Restart Summary</h2>
+    <div class="detail-meta">
+        <div><strong>Source:</strong> {{ continuation_summary.source or '—' }}</div>
+        <div><strong>Model:</strong> {{ continuation_summary.model_name or '—' }}</div>
+        <div><strong>Tokens:</strong> {{ "{:,}".format(continuation_summary.prompt_tokens or 0) }} + cached {{ "{:,}".format(continuation_summary.cached_prompt_tokens or 0) }} + out {{ "{:,}".format(continuation_summary.completion_tokens or 0) }}</div>
+        <div><strong>Cost:</strong> ${{ "%.4f"|format(continuation_summary.cost or 0) }}</div>
+        {% if continuation_summary.updated_at %}
+        <div><strong>Updated:</strong> <span data-utc="{{ continuation_summary.updated_at }}">{{ continuation_summary.updated_at }}</span></div>
+        {% endif %}
+    </div>
+    <div class="step-summary" style="margin-top: 0.75rem;">
+        <pre>{{ continuation_summary.summary }}</pre>
+    </div>
+</div>
+{% endif %}
+
 {% if failure_context %}
 <div class="card" id="failure-context-card">
     <h2>Failure Context</h2>

@@ -27,7 +27,7 @@ class ProviderResponse:
 
     Mirrors the shape of the Azure/OpenAI Responses API just enough for the
     harness to extract tool calls, text output, token usage and the session
-    identifier (``response_id``) used for warm-starting subsequent turns.
+    identifier (``response_id``) used for tracing subsequent turns.
     """
     output: List[Dict[str, Any]]            # raw items (function_call / message / ...)
     response_id: Optional[str] = None
@@ -53,7 +53,6 @@ class LLMProvider(ABC):
         self,
         input_data: List[Any],
         tools: List[Dict[str, Any]],
-        previous_response_id: Optional[str] = None,
     ) -> Optional[ProviderResponse]:
         """Make a single provider call.
 
@@ -61,7 +60,6 @@ class LLMProvider(ABC):
             input_data: Chat-style messages or tool outputs to append to the
                 running conversation (as accepted by the underlying API).
             tools: OpenAI-style function/tool definitions.
-            previous_response_id: Opaque session identifier for warm-starting.
 
         Returns:
             :class:`ProviderResponse` on success, ``None`` on unrecoverable

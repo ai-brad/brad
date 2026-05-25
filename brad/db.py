@@ -320,6 +320,49 @@ def update_execution_costs(
         )
 
 
+def update_execution_continuation_summary(
+    execution_id: int,
+    summary: str,
+    *,
+    source: str = "",
+    model_name: str = "",
+    prompt_tokens: int = 0,
+    cached_prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cost: float = 0.0,
+) -> None:
+    """Persist the latest restart summary metadata on an execution."""
+    updated_at = _now()
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE executions
+               SET continuation_summary=?,
+                   continuation_summary_source=?,
+                   continuation_summary_model_name=?,
+                   continuation_summary_prompt_tokens=?,
+                   continuation_summary_cached_prompt_tokens=?,
+                   continuation_summary_completion_tokens=?,
+                   continuation_summary_total_tokens=?,
+                   continuation_summary_cost=?,
+                   continuation_summary_updated_at=?
+             WHERE id=?
+            """,
+            (
+                (summary or "").strip(),
+                (source or "").strip(),
+                (model_name or "").strip(),
+                int(prompt_tokens or 0),
+                int(cached_prompt_tokens or 0),
+                int(completion_tokens or 0),
+                int((prompt_tokens or 0) + (completion_tokens or 0)),
+                float(cost or 0.0),
+                updated_at,
+                execution_id,
+            ),
+        )
+
+
 def update_execution_pr(execution_id: int, pr_number: int, pr_url: str) -> None:
     """Update PR info on an execution as soon as the PR is created."""
     now = _now()
@@ -1019,3 +1062,62 @@ def set_repo_metadata(repo_path: str, key: str, value: str, source_file: str = "
                    updated_at=excluded.updated_at""",
             (repo_path, key, value, source_file, _now()),
         )
+
+
+def _issue_context_metadata_key(issue_key: str) -> str:
+    issue_key = (issue_key or "").strip()
+    if not issue_key:
+        raise ValueError("issue_key must be provided")
+    return f"issue_context_summary::{issue_key}"
+
+
+def get_issue_context_summary(repo_path: str, issue_key: str) -> Optional[Dict]:
+    """Get the stored restart summary for a repo issue, if present."""
+    raw = get_repo_metadata(repo_path, _issue_context_metadata_key(issue_key))
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {"summary": raw}
+    if isinstance(data, dict):
+        summary = data.get("summary")
+        if isinstance(summary, str):
+            return data
+    if isinstance(data, str):
+        return {"summary": data}
+    return None
+
+
+def set_issue_context_summary(
+    repo_path: str,
+    issue_key: str,
+    summary: str,
+    *,
+    source: str = "",
+    model_name: str = "",
+    execution_id: Optional[int] = None,
+    prompt_tokens: int = 0,
+    cached_prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cost: float = 0.0,
+) -> None:
+    """Persist the restart summary for a repo issue."""
+    payload = {
+        "summary": (summary or "").strip(),
+        "source": (source or "").strip(),
+        "model_name": (model_name or "").strip(),
+        "execution_id": execution_id,
+        "prompt_tokens": int(prompt_tokens or 0),
+        "cached_prompt_tokens": int(cached_prompt_tokens or 0),
+        "completion_tokens": int(completion_tokens or 0),
+        "total_tokens": int((prompt_tokens or 0) + (completion_tokens or 0)),
+        "cost": float(cost or 0.0),
+        "updated_at": _now(),
+    }
+    set_repo_metadata(
+        repo_path,
+        _issue_context_metadata_key(issue_key),
+        json.dumps(payload, ensure_ascii=False),
+        source_file=(source or "").strip(),
+    )

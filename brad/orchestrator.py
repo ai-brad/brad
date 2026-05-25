@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 from brad.logging_config import get_logger
 from brad.config import Config
-from brad.adapters.ticketing.jira_adapter import JiraAdapter
+from brad.adapters.ticketing import build_ticketing_adapter
 from brad.adapters.code_repository.github_adapter import GitHubAdapter
 from brad.adapters.ci_cd.github_actions_adapter import GitHubActionsAdapter
 from brad.adapters.observability.azure_adapter import AzureObservabilityAdapter
@@ -34,7 +34,7 @@ class IssueState:
     branch_name: str
     execution_id: int = 0
     jira_updated: str = ""
-    last_response_id: Optional[str] = None
+    continuation_summary: str = ""
     pr_number: Optional[int] = None
     clarification_count: int = 0
     ci_fix_count: int = 0
@@ -62,7 +62,7 @@ class BradOrchestrator:
         self.cfg = cfg
 
         # Initialize adapters
-        self.ticketing = JiraAdapter(cfg)
+        self.ticketing = build_ticketing_adapter(cfg)
         self.code_repo = GitHubAdapter(cfg)
         self.ci = GitHubActionsAdapter(cfg)
         self.observability = AzureObservabilityAdapter(cfg)
@@ -80,6 +80,211 @@ class BradOrchestrator:
 
     def _execution_model_name(self) -> str:
         return getattr(self.agent.harness, "model_name", None) or self.cfg.azure_openai_model
+
+    @staticmethod
+    def _maybe_text(value) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    def _summarization_model_name(self) -> str:
+        harness = self.agent.harness
+        return (
+            getattr(harness, "_resolved_summarization_model_name", None)
+            or getattr(harness, "model_name", None)
+            or self.cfg.azure_openai_model
+        )
+
+    def _summary_usage_metrics(self, usage) -> Dict[str, float]:
+        if not usage:
+            return {
+                "prompt_tokens": 0,
+                "cached_prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cost": 0.0,
+            }
+
+        model_name = self._summarization_model_name()
+        try:
+            costs = db.get_model_cost(model_name)
+        except Exception as e:
+            self.logger.debug(f"Could not load model cost for summary accounting: {e}")
+            costs = {"prompt": 0.0, "cached_prompt": 0.0, "completion": 0.0}
+
+        def _coerce_int(value) -> int:
+            if isinstance(value, bool) or value is None:
+                return 0
+            if isinstance(value, (int, float)):
+                return int(value)
+            try:
+                return int(value)
+            except Exception:
+                return 0
+
+        cached = _coerce_int(getattr(usage, "cached_tokens", 0))
+        prompt_tokens = _coerce_int(getattr(usage, "prompt_tokens", 0))
+        completion_tokens = _coerce_int(getattr(usage, "completion_tokens", 0))
+        non_cached_prompt = max(0, prompt_tokens - cached)
+        prompt_cost = (non_cached_prompt / 1000.0) * float(costs.get("prompt", 0.0) or 0.0)
+        cached_rate = float(costs.get("cached_prompt", (costs.get("prompt", 0.0) or 0.0) * 0.5) or 0.0)
+        cached_cost = (cached / 1000.0) * cached_rate
+        completion_cost = (completion_tokens / 1000.0) * float(costs.get("completion", 0.0) or 0.0)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "cached_prompt_tokens": cached,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "cost": prompt_cost + cached_cost + completion_cost,
+        }
+
+    def _persist_issue_continuation_summary(
+        self,
+        issue_key: str,
+        summary: str,
+        *,
+        source: str,
+        execution_id: Optional[int] = None,
+        usage=None,
+        metrics: Optional[Dict] = None,
+        model_name: Optional[str] = None,
+    ) -> None:
+        metrics = metrics or self._summary_usage_metrics(usage)
+        model_name = (model_name or self._summarization_model_name()).strip()
+        try:
+            db.set_issue_context_summary(
+                str(self.repo.repo_path),
+                issue_key,
+                summary,
+                source=source,
+                model_name=model_name,
+                execution_id=execution_id,
+                prompt_tokens=int(metrics["prompt_tokens"]),
+                cached_prompt_tokens=int(metrics["cached_prompt_tokens"]),
+                completion_tokens=int(metrics["completion_tokens"]),
+                cost=float(metrics["cost"]),
+            )
+        except Exception as e:
+            self.logger.debug(f"Could not persist continuation summary for {issue_key}: {e}")
+
+        if execution_id:
+            try:
+                db.update_execution_continuation_summary(
+                    execution_id,
+                    summary,
+                    source=source,
+                    model_name=model_name,
+                    prompt_tokens=int(metrics["prompt_tokens"]),
+                    cached_prompt_tokens=int(metrics["cached_prompt_tokens"]),
+                    completion_tokens=int(metrics["completion_tokens"]),
+                    cost=float(metrics["cost"]),
+                )
+            except Exception as e:
+                self.logger.debug(f"Could not persist execution summary metadata for {issue_key}: {e}")
+
+    def _get_issue_continuation_summary_record(self, issue_key: str) -> Dict:
+        try:
+            stored = db.get_issue_context_summary(str(self.repo.repo_path), issue_key)
+        except Exception as e:
+            self.logger.debug(f"Could not read continuation summary for {issue_key}: {e}")
+            stored = None
+        return stored or {}
+
+    def _load_issue_continuation_summary(self, issue_key: str) -> str:
+        stored = self._get_issue_continuation_summary_record(issue_key)
+        summary = self._maybe_text(stored.get("summary"))
+        return summary
+
+    def _compact_issue_context(
+        self,
+        issue_key: str,
+        seed_text: str,
+        source: str,
+        execution_id: Optional[int] = None,
+    ) -> str:
+        seed_text = (seed_text or "").strip()
+        if not seed_text:
+            return ""
+
+        summary = ""
+        harness = self.agent.harness
+        summarize = getattr(harness, "summarize_context", None)
+        if callable(summarize):
+            try:
+                summary = summarize(seed_text, str(self.repo.repo_path), subject=issue_key).strip()
+            except Exception as e:
+                self.logger.warning(f"{issue_key}: continuation summarization failed: {e}")
+
+        if not summary:
+            summary = seed_text[:3000]
+
+        usage = getattr(harness, "_last_summary_usage", None)
+        self._persist_issue_continuation_summary(
+            issue_key,
+            summary,
+            source=source,
+            execution_id=execution_id,
+            usage=usage,
+        )
+        return summary
+
+    def _build_issue_continuation_summary(
+        self,
+        issue_key: str,
+        execution_id: Optional[int] = None,
+    ) -> str:
+        stored_record = self._get_issue_continuation_summary_record(issue_key)
+        stored = self._maybe_text(stored_record.get("summary"))
+        if stored:
+            if execution_id:
+                self._persist_issue_continuation_summary(
+                    issue_key,
+                    stored,
+                    source=self._maybe_text(stored_record.get("source")) or "stored",
+                    execution_id=execution_id,
+                    model_name=self._maybe_text(stored_record.get("model_name")) or None,
+                    metrics={
+                        "prompt_tokens": int(stored_record.get("prompt_tokens") or 0),
+                        "cached_prompt_tokens": int(stored_record.get("cached_prompt_tokens") or 0),
+                        "completion_tokens": int(stored_record.get("completion_tokens") or 0),
+                        "total_tokens": int(stored_record.get("total_tokens") or 0),
+                        "cost": float(stored_record.get("cost") or 0.0),
+                    },
+                )
+            return stored
+        seed = self._summarize_prior_activity(issue_key)
+        if not seed:
+            return ""
+        return self._compact_issue_context(issue_key, seed, source="prior_activity", execution_id=execution_id)
+
+    def _refresh_issue_continuation_summary(
+        self,
+        issue_key: str,
+        response: Dict,
+        source: str,
+        execution_id: Optional[int] = None,
+    ) -> str:
+        current = self._load_issue_continuation_summary(issue_key)
+        note = self._maybe_text(response.get("summary")) or self._maybe_text(response.get("message"))
+        seed_parts = [part for part in (current, note) if part]
+        seed = "\n\n".join(seed_parts).strip()
+        if not seed:
+            if current and execution_id:
+                stored_record = self._get_issue_continuation_summary_record(issue_key)
+                self._persist_issue_continuation_summary(
+                    issue_key,
+                    current,
+                    source=self._maybe_text(stored_record.get("source")) or source,
+                    execution_id=execution_id,
+                    model_name=self._maybe_text(stored_record.get("model_name")) or None,
+                    metrics={
+                        "prompt_tokens": int(stored_record.get("prompt_tokens") or 0),
+                        "cached_prompt_tokens": int(stored_record.get("cached_prompt_tokens") or 0),
+                        "completion_tokens": int(stored_record.get("completion_tokens") or 0),
+                        "total_tokens": int(stored_record.get("total_tokens") or 0),
+                        "cost": float(stored_record.get("cost") or 0.0),
+                    },
+                )
+            return current
+        return self._compact_issue_context(issue_key, seed, source=source, execution_id=execution_id)
 
     def _load_repo_instructions(self) -> str:
         """Read dev instructions from the target repo's well-known files and cache in DB.
@@ -437,8 +642,8 @@ class BradOrchestrator:
             self.logger.warning(f"Could not create execution for conflict resolution: {e}")
             execution_id = 0
 
-        last_response_id: Optional[str] = None
         current_files = list(conflicted_files)
+        continuation_summary = self._build_issue_continuation_summary(branch_name, execution_id=execution_id)
 
         for iteration in range(1, self.MAX_CONFLICT_ITERATIONS + 1):
             if self._stop_requested(branch_name):
@@ -473,10 +678,9 @@ class BradOrchestrator:
                 context_section=context_section,
                 repo_path=str(self.repo.repo_path),
                 iteration=iteration,
-                previous_response_id=last_response_id,
                 dev_instructions=self._repo_dev_instructions,
+                continuation_context=continuation_summary,
             )
-            last_response_id = response.get("_response_id")
 
             usage = response.get("_usage")
             cost = self._calculate_cost(usage)
@@ -495,6 +699,17 @@ class BradOrchestrator:
                     db.update_execution_costs(execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
                 except Exception:
                     pass
+
+            summary_source = f"rebase_conflict_resolution iteration {iteration}"
+            state_summary = self._refresh_issue_continuation_summary(
+                branch_name,
+                response,
+                summary_source,
+                execution_id=execution_id,
+            )
+            if state_summary:
+                continuation_summary = state_summary
+                self.logger.debug(f"Updated continuation summary for {branch_name} after conflict iteration {iteration}")
 
             action = response.get("action")
             if action == "stuck" or action == "error":
@@ -918,6 +1133,7 @@ class BradOrchestrator:
             repo_path=str(self.repo.repo_path),
             dev_instructions=self._repo_dev_instructions,
             pr_diff=pr_diff,
+            continuation_context=self._build_issue_continuation_summary(branch_name),
         )
 
         comment_results = result.get('comment_results', [])
@@ -1091,12 +1307,59 @@ class BradOrchestrator:
             return ""
 
         lines: List[str] = []
+        latest = executions[0]
+        issue_title = (latest.get("issue_title") or "").strip()
+        issue_summary = (latest.get("summary") or "").strip()
+        latest_steps = []
+        try:
+            latest_steps = db.get_execution_steps(latest.get("id")) if latest.get("id") else []
+        except Exception:
+            latest_steps = []
+        latest_step = latest_steps[-1] if latest_steps else None
+        latest_step_summary = (latest_step.get("result_summary") or "").strip().replace("\n", " ") if latest_step else ""
+        if len(latest_step_summary) > 220:
+            latest_step_summary = latest_step_summary[:220] + "…"
+
+        if issue_title:
+            lines.append(f"- Issue title: {issue_title}")
+        if issue_title or issue_summary:
+            lines.append(f"- Goal: {issue_title or issue_summary}")
+        lines.append(
+            "- Current state: "
+            f"latest execution #{latest.get('id')} status={latest.get('status', '')} "
+            f"phase={latest.get('current_phase') or 'unknown'}"
+        )
+        current_detail = (latest.get("current_phase_detail") or "").strip()
+        if current_detail:
+            lines.append(f"  - Current detail: {current_detail}")
+        error_message = (latest.get("error_message") or "").strip()
+        if error_message:
+            lines.append(f"  - Last error: {error_message}")
+        if latest_step:
+            latest_step_phase = (latest_step.get("phase") or "").strip()
+            latest_step_status = (latest_step.get("status") or "").strip()
+            step_label = latest_step_phase or "unknown"
+            if latest_step_status:
+                step_label += f" ({latest_step_status})"
+            lines.append(f"- Latest step: {step_label}")
+            if latest_step_summary:
+                lines.append(f"  - Latest step result: {latest_step_summary}")
+
         # Walk from oldest to newest so the agent reads chronologically.
         for execution in reversed(executions):
             exec_id = execution.get("id")
             started = execution.get("started_at", "")
             status = execution.get("status", "")
-            lines.append(f"- Execution #{exec_id} [{started}] status={status}")
+            action = (execution.get("action") or "").strip()
+            phase = (execution.get("current_phase") or "").strip()
+            phase_detail = (execution.get("current_phase_detail") or "").strip()
+            lines.append(
+                f"- Execution #{exec_id} [{started}] status={status}"
+                + (f" action={action}" if action else "")
+                + (f" phase={phase}" if phase else "")
+            )
+            if phase_detail:
+                lines.append(f"    • Phase detail: {phase_detail}")
             try:
                 steps = db.get_execution_steps(exec_id) if exec_id else []
             except Exception:
@@ -1245,6 +1508,7 @@ class BradOrchestrator:
                 jira_updated=fields.get("updated", ""),
                 cost_budget=float(self.cfg.__dict__.get("cost_budget")),
             )
+            state.continuation_summary = self._build_issue_continuation_summary(issue_key, execution_id=execution_id)
 
             # Step 4: Check for BradScrapExisting label — scrap existing work if present
             has_scrap_label = "BradScrapExisting" in issue.get("fields", {}).get("labels", [])
@@ -1328,10 +1592,15 @@ class BradOrchestrator:
                 attachment_paths=state.attachment_paths,
                 repo_path=str(self.repo.repo_path),
                 iteration=state.clarification_count,
-                previous_response_id=state.last_response_id,
+                continuation_context=state.continuation_summary,
             )
-            state.last_response_id = response.get("_response_id")
             self._record_step(state.execution_id, "requirements", response)
+            state.continuation_summary = self._refresh_issue_continuation_summary(
+                state.issue_key,
+                response,
+                "requirements",
+                execution_id=state.execution_id,
+            )
             set_cached_phase(
                 issue_key=state.issue_key, phase="requirements",
                 main_commit=main_commit, jira_updated=state.jira_updated,
@@ -1377,11 +1646,16 @@ class BradOrchestrator:
             attachment_paths=state.attachment_paths,
             repo_path=str(self.repo.repo_path),
             branch_name=state.branch_name, iteration=0,
-            previous_response_id=state.last_response_id,
             dev_instructions=self._repo_dev_instructions,
             existing_pr=existing_pr,
+            continuation_context=state.continuation_summary,
         )
-        state.last_response_id = response.get("_response_id")
+        state.continuation_summary = self._refresh_issue_continuation_summary(
+            state.issue_key,
+            response,
+            "implementation",
+            execution_id=state.execution_id,
+        )
 
         # Record step costs
         usage = response.get("_usage")
@@ -1567,6 +1841,7 @@ class BradOrchestrator:
                 issue_key=state.issue_key, description=state.description,
                 diff=diff, repo_path=str(self.repo.repo_path),
                 branch_name=state.branch_name,
+                continuation_context=state.continuation_summary,
             )
 
             action = response.get("action")
@@ -1576,6 +1851,12 @@ class BradOrchestrator:
             pt, ct, cached_pt = self._usage_totals(usage)
             db.finish_step(step_id, status=action or "completed", prompt_tokens=pt, cached_prompt_tokens=cached_pt, completion_tokens=ct, cost=cost, result_summary=_clip_summary(message))
             db.update_execution_costs(state.execution_id, pt, ct, cost, cached_prompt_tokens=cached_pt)
+            state.continuation_summary = self._refresh_issue_continuation_summary(
+                state.issue_key,
+                response,
+                "local_review",
+                execution_id=state.execution_id,
+            )
 
             if action == "approved":
                 self.ticketing.comment(state.issue_key, f"Local code review PASSED:\n\n{message}")
@@ -1610,10 +1891,15 @@ class BradOrchestrator:
             repo_path=str(self.repo.repo_path),
             branch_name=state.branch_name,
             iteration=state.local_review_fix_count,
-            previous_response_id=state.last_response_id,
             dev_instructions=self._repo_dev_instructions,
+            continuation_context=state.continuation_summary,
         )
-        state.last_response_id = response.get("_response_id")
+        state.continuation_summary = self._refresh_issue_continuation_summary(
+            state.issue_key,
+            response,
+            "local_review_fix",
+            execution_id=state.execution_id,
+        )
 
         # Record step costs
         usage = response.get("_usage")
@@ -1841,10 +2127,15 @@ class BradOrchestrator:
             branch_name=state.branch_name, pr_number=pr_number,
             iteration=state.ci_fix_count,
             failed_test_target=failed_test_target,
-            previous_response_id=state.last_response_id,
             dev_instructions=self._repo_dev_instructions,
+            continuation_context=state.continuation_summary,
         )
-        state.last_response_id = response.get("_response_id")
+        state.continuation_summary = self._refresh_issue_continuation_summary(
+            state.issue_key,
+            response,
+            "ci_fix",
+            execution_id=state.execution_id,
+        )
 
         # Record step costs
         usage = response.get("_usage")
@@ -1908,10 +2199,15 @@ class BradOrchestrator:
             repo_path=str(self.repo.repo_path),
             branch_name=state.branch_name, pr_number=pr_number,
             iteration=state.review_fix_count,
-            previous_response_id=state.last_response_id,
             dev_instructions=self._repo_dev_instructions,
+            continuation_context=state.continuation_summary,
         )
-        state.last_response_id = response.get("_response_id")
+        state.continuation_summary = self._refresh_issue_continuation_summary(
+            state.issue_key,
+            response,
+            "review_fix",
+            execution_id=state.execution_id,
+        )
 
         # Record step costs
         usage = response.get("_usage")

@@ -308,6 +308,57 @@ class TestDatabaseIntegration:
         cached = db.get_repo_metadata("/test/repo", "dev_instructions")
         assert "Run pytest -v" in cached
 
+    def test_issue_context_summary_persistence(self, temp_db):
+        """Test stored issue continuation summaries round-trip through the DB."""
+        db.set_issue_context_summary(
+            "/test/repo",
+            "TEST-42",
+            "Compact summary of prior work",
+            source="implementation",
+            model_name="gpt-5.4",
+            execution_id=123,
+            prompt_tokens=80,
+            cached_prompt_tokens=20,
+            completion_tokens=40,
+            cost=0.12,
+        )
+
+        stored = db.get_issue_context_summary("/test/repo", "TEST-42")
+        assert stored is not None
+        assert stored["summary"] == "Compact summary of prior work"
+        assert stored["source"] == "implementation"
+        assert stored["model_name"] == "gpt-5.4"
+        assert stored["execution_id"] == 123
+        assert stored["prompt_tokens"] == 80
+        assert stored["cached_prompt_tokens"] == 20
+        assert stored["completion_tokens"] == 40
+        assert stored["total_tokens"] == 120
+        assert stored["cost"] == 0.12
+
+    def test_execution_continuation_summary_metadata_persistence(self, temp_db):
+        """Execution rows should store the latest restart-summary metadata for the UI."""
+        exec_id = db.create_execution("TEST-43", "Test issue", model_name="gpt-5.4")
+        db.update_execution_continuation_summary(
+            exec_id,
+            "Compact summary of prior work",
+            source="requirements",
+            model_name="gpt-5.4-mini",
+            prompt_tokens=80,
+            cached_prompt_tokens=20,
+            completion_tokens=40,
+            cost=0.12,
+        )
+
+        execution = db.get_execution(exec_id)
+        assert execution["continuation_summary"] == "Compact summary of prior work"
+        assert execution["continuation_summary_source"] == "requirements"
+        assert execution["continuation_summary_model_name"] == "gpt-5.4-mini"
+        assert execution["continuation_summary_prompt_tokens"] == 80
+        assert execution["continuation_summary_cached_prompt_tokens"] == 20
+        assert execution["continuation_summary_completion_tokens"] == 40
+        assert execution["continuation_summary_total_tokens"] == 120
+        assert execution["continuation_summary_cost"] == 0.12
+
 
 class TestOrchestratorPhaseManagement:
     """Test orchestrator phase transitions and state management."""

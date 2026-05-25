@@ -35,7 +35,6 @@ class AzureOpenAIProvider(LLMProvider):
         self,
         input_data: List[Any],
         tools: List[Dict[str, Any]],
-        previous_response_id: Optional[str] = None,
     ) -> Optional[ProviderResponse]:
         body: Dict[str, Any] = {
             "model": self.model,
@@ -44,9 +43,6 @@ class AzureOpenAIProvider(LLMProvider):
             "parallel_tool_calls": True,
             "max_output_tokens": 16384,
         }
-        if previous_response_id:
-            body["previous_response_id"] = previous_response_id
-
         headers = {
             "Content-Type": "application/json",
             "api-key": self.api_key,

@@ -34,7 +34,7 @@ Brad is a **thin orchestration layer** that delegates all engineering decisions 
 
 | Layer | Abstract Interface | Current Implementation |
 |---|---|---|
-| **Ticketing** | `TicketingAdapter` | Jira |
+| **Ticketing** | `TicketingAdapter` | Jira, local dummy adapter |
 | **Code Repository** | `CodeRepositoryAdapter` | GitHub |
 | **CI/CD** | `CICDAdapter` | GitHub Actions |
 | **Observability** | `ObservabilityAdapter` | Azure AKS |
@@ -124,6 +124,7 @@ cp .env.example .env
 - **Azure OpenAI**: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL` - [Azure OpenAI setup](https://learn.microsoft.com/en-us/azure/ai-services/openai/quickstart)
 
 **Optional Settings:**
+- **Ticketing**: `BRAD_TICKETING=dummy` switches Brad to the local dummy ticket adapter for summary smoke tests. Use `BRAD_DUMMY_TICKET_PATH` and `BRAD_DUMMY_TICKET_LOG_PATH` to point at the fixture and log file.
 - **Cost Tracking**: `LLM_COST_PER_1K_PROMPT_TOKENS`, `LLM_COST_PER_1K_COMPLETION_TOKENS`
 - **Safety Limits**: `MAX_CI_FIX_ITERATIONS`, `MAX_REVIEW_FIX_ITERATIONS`
 - **Azure AKS**: For deployment monitoring (can be left empty)
@@ -193,6 +194,21 @@ The dashboard shows:
 ```bash
 uv run python brad.py run --once --log-level DEBUG
 ```
+
+### Local Summary Smoke
+
+To exercise the restart-summary path with real Codex credentials but without
+touching Jira or creating PRs:
+
+```bash
+BRAD_TICKETING=dummy BRAD_HARNESS=codex uv run python scripts/summary_smoke.py
+```
+
+That script clones or reuses the target repo in a temporary workspace, runs the
+requirements-analysis turn twice, persists the continuation summary, and then
+replays the issue so the stored summary is loaded again.
+The execution detail page shows the stored restart summary, model, token count,
+and summary cost when that metadata is available.
 
 ## 🔄 How It Works
 
@@ -332,6 +348,9 @@ A: No. Brad creates PRs and marks them as ready for review, but a human must mer
 **Q: Can I use OpenAI directly instead of Azure?**  
 A: Two routes:
 1. Set `BRAD_HARNESS=codex` to delegate the entire agentic loop to OpenAI's [Codex CLI](https://github.com/openai/codex) — it brings its own model auth (`codex login` / `OPENAI_API_KEY`).
+   - `CODEX_MODEL` overrides the main Codex run model.
+   - `CODEX_SUMMARIZATION_MODEL` powers the restart-summary compaction path; it defaults to `CODEX_MODEL`.
+   - Codex runs restart from persisted summaries instead of resuming a hidden thread state.
 2. For Brad's native harness, only Azure OpenAI is wired today; adding an `OpenAIProvider` (or vLLM, etc.) is a small file under `brad/adapters/llm/`.
 
 Anthropic Claude Code is not currently supported.

@@ -6,6 +6,7 @@ import pytest
 from brad import db
 from brad.gui.app import (
     build_execution_cost_breakdown,
+    build_execution_continuation_summary,
     build_ticket_cost_breakdown,
     build_execution_failure_context,
     decorate_execution,
@@ -79,6 +80,34 @@ def test_build_execution_cost_breakdown_aggregates_cached_and_non_cached_tokens(
             "cost_pct": pytest.approx(14.2857142),
         },
     ]
+
+
+def test_build_execution_continuation_summary_returns_summary_metadata():
+    execution = {
+        "continuation_summary": "Compact summary",
+        "continuation_summary_source": "requirements",
+        "continuation_summary_model_name": "gpt-5.4-mini",
+        "continuation_summary_prompt_tokens": 128,
+        "continuation_summary_cached_prompt_tokens": 16,
+        "continuation_summary_completion_tokens": 40,
+        "continuation_summary_total_tokens": 168,
+        "continuation_summary_cost": 0.42,
+        "continuation_summary_updated_at": "2026-05-25T08:00:00+00:00",
+    }
+
+    summary = build_execution_continuation_summary(execution)
+
+    assert summary == {
+        "summary": "Compact summary",
+        "source": "requirements",
+        "model_name": "gpt-5.4-mini",
+        "prompt_tokens": 128,
+        "cached_prompt_tokens": 16,
+        "completion_tokens": 40,
+        "total_tokens": 168,
+        "cost": 0.42,
+        "updated_at": "2026-05-25T08:00:00+00:00",
+    }
 
 
 def test_api_execution_detail_includes_cost_breakdown(temp_db):

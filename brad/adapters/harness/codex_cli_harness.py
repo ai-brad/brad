@@ -55,6 +55,10 @@ class CodexCliHarness(AgentHarness):
         # codex falls back to ~/.codex/config.toml (model + provider + auth).
         self.model = getattr(cfg, "codex_model", None) or None
         self._resolved_model_name = self._resolve_model_name()
+        # Used by restart-summary compaction. Defaults to the main Codex
+        # model so current behavior stays stable unless overridden.
+        self.summarization_model = getattr(cfg, "codex_summarization_model", None) or None
+        self._resolved_summarization_model_name = self._resolve_summarization_model_name()
         self.sandbox = getattr(cfg, "codex_sandbox", None) or "workspace-write"
         # ``codex_approval`` controls how aggressively Codex auto-approves shell
         # commands.  For non-interactive ``codex exec`` runs the relevant knobs
@@ -67,6 +71,7 @@ class CodexCliHarness(AgentHarness):
         # network egress and ``.git`` writes that ``--full-auto`` blocks.
         self.approval = (getattr(cfg, "codex_approval", None) or "danger").lower()
         self.timeout = int(getattr(cfg, "codex_timeout", 0) or 3600)
+        self._last_summary_usage: Optional[LLMUsage] = None
 
         if shutil.which(self.bin) is None:
             self.logger.warning(
@@ -76,6 +81,7 @@ class CodexCliHarness(AgentHarness):
         self.logger.info(
             f"CodexCliHarness initialized: bin={self.bin} "
             f"model={self.model or self._resolved_model_name or '<from ~/.codex/config.toml>'} "
+            f"summarization_model={self.summarization_model or self._resolved_summarization_model_name or '<same as model>'} "
             f"sandbox={self.sandbox} approval={self.approval}"
         )
 
@@ -89,40 +95,90 @@ class CodexCliHarness(AgentHarness):
         task_prompt: str,
         repo_path: str,
         system_prompt: str = "",
-        previous_response_id: Optional[str] = None,
     ) -> LLMResult:
-        if previous_response_id:
-            # Documented limitation; see TODO at the bottom of the file.
-            self.logger.debug(
-                "CodexCliHarness ignores previous_response_id (warm-start not yet wired)."
-            )
-
         full_prompt = self._build_prompt(system_prompt, task_prompt)
+        return self._run_exec(full_prompt, repo_path, task_preview=task_prompt[:300], model=self.model, approval_flags=self._approval_flags())
 
+    def summarize_context(self, context_text: str, repo_path: str, subject: str = "") -> str:
+        """Compact prior activity into a restart-friendly summary."""
+        context_text = (context_text or "").strip()
+        if not context_text:
+            return ""
+
+        prompt = self._build_summary_prompt(context_text, subject)
+        model = self._resolved_summarization_model_name or self._resolved_model_name or self.model
+        self._last_summary_usage = None
+        result = self._run_exec(
+            prompt,
+            repo_path,
+            task_preview=(subject or "context summary")[:300],
+            model=model,
+            approval_flags=["--sandbox", "read-only"],
+        )
+        summary = result.text.strip()
+        if summary.startswith("ERROR:"):
+            self.logger.warning("Codex summary run failed: %s", summary[:300])
+            return ""
+        self._last_summary_usage = result.usage
+        return summary
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _approval_flags(self) -> list:
+        """Translate the high-level ``codex_approval`` knob to ``codex exec`` flags.
+
+        ``codex exec`` is non-interactive and does NOT accept the legacy
+        ``--ask-for-approval`` flag.  The supported modes are:
+
+        * ``full-auto`` (default) — sandboxed, no prompts (``--full-auto``).
+        * ``danger`` / ``dangerously-bypass`` — no sandbox, no prompts
+          (``--dangerously-bypass-approvals-and-sandbox``).
+        * ``sandbox-only`` — pass only ``--sandbox <mode>`` and let Codex use
+          its config defaults.
+        """
+        approval = self.approval
+        if approval in ("danger", "dangerously-bypass", "dangerously_bypass",
+                        "dangerously-bypass-approvals-and-sandbox", "bypass"):
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+        if approval in ("sandbox-only", "sandbox_only", "sandbox"):
+            return ["--sandbox", self.sandbox]
+        if approval in ("full-auto", "full_auto", "auto"):
+            return ["--full-auto"]
+        # Default: danger (no sandbox, full network) — see __init__ for rationale.
+        if approval not in ("danger", "never", ""):
+            self.logger.warning(
+                f"Unknown codex_approval={approval!r}; falling back to "
+                f"--dangerously-bypass-approvals-and-sandbox"
+            )
+        return ["--dangerously-bypass-approvals-and-sandbox"]
+
+    def _run_exec(
+        self,
+        prompt_text: str,
+        repo_path: str,
+        *,
+        task_preview: str = "",
+        model: Optional[str] = None,
+        approval_flags: Optional[List[str]] = None,
+    ) -> LLMResult:
         with tempfile.TemporaryDirectory(prefix="brad-codex-") as tmpdir:
             last_msg_path = Path(tmpdir) / "last_message.txt"
             argv = [self.bin, "exec"]
-            if previous_response_id:
-                argv.extend(["resume", previous_response_id])
-                argv.extend([
-                    "--skip-git-repo-check",
-                    "--output-last-message", str(last_msg_path),
-                    "--json",  # stream JSONL events on stdout for live visibility
-                ])
-            else:
-                argv.extend([
-                    "--cd", repo_path,
-                    "--skip-git-repo-check",
-                    "--output-last-message", str(last_msg_path),
-                    "--json",  # stream JSONL events on stdout for live visibility
-                ])
-            if self.model:
-                argv.extend(["--model", self.model])
-            argv += self._approval_flags()
+            argv.extend([
+                "--cd", repo_path,
+                "--skip-git-repo-check",
+                "--output-last-message", str(last_msg_path),
+                "--json",  # stream JSONL events on stdout for live visibility
+            ])
+            if model:
+                argv.extend(["--model", model])
+            argv += approval_flags if approval_flags is not None else self._approval_flags()
             argv.append("-")  # read prompt from stdin
 
             self.logger.info(f"=== CodexCliHarness invoking: {' '.join(argv[:-1])} (stdin) ===")
-            self.logger.info(f"Task preview: {task_prompt[:300]}...")
+            if task_preview:
+                self.logger.info(f"Task preview: {task_preview}...")
 
             session_id = uuid.uuid4().hex  # fallback if codex does not emit a thread id
             try:
@@ -161,13 +217,13 @@ class CodexCliHarness(AgentHarness):
             # Send the prompt then close stdin so codex starts processing.
             try:
                 assert proc.stdin is not None
-                proc.stdin.write(full_prompt)
+                proc.stdin.write(prompt_text)
                 proc.stdin.close()
             except BrokenPipeError:
                 pass
 
             usage = LLMUsage()
-            thread_id: Optional[str] = previous_response_id or None
+            thread_id: Optional[str] = None
             try:
                 thread_id = self._stream_events(proc, usage, default_thread_id=thread_id)
                 proc.wait(timeout=self.timeout)
@@ -198,36 +254,29 @@ class CodexCliHarness(AgentHarness):
             )
             return LLMResult(text=text, response_id=thread_id or session_id, usage=usage)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-    def _approval_flags(self) -> list:
-        """Translate the high-level ``codex_approval`` knob to ``codex exec`` flags.
-
-        ``codex exec`` is non-interactive and does NOT accept the legacy
-        ``--ask-for-approval`` flag.  The supported modes are:
-
-        * ``full-auto`` (default) — sandboxed, no prompts (``--full-auto``).
-        * ``danger`` / ``dangerously-bypass`` — no sandbox, no prompts
-          (``--dangerously-bypass-approvals-and-sandbox``).
-        * ``sandbox-only`` — pass only ``--sandbox <mode>`` and let Codex use
-          its config defaults.
-        """
-        approval = self.approval
-        if approval in ("danger", "dangerously-bypass", "dangerously_bypass",
-                        "dangerously-bypass-approvals-and-sandbox", "bypass"):
-            return ["--dangerously-bypass-approvals-and-sandbox"]
-        if approval in ("sandbox-only", "sandbox_only", "sandbox"):
-            return ["--sandbox", self.sandbox]
-        if approval in ("full-auto", "full_auto", "auto"):
-            return ["--full-auto"]
-        # Default: danger (no sandbox, full network) — see __init__ for rationale.
-        if approval not in ("danger", "never", ""):
-            self.logger.warning(
-                f"Unknown codex_approval={approval!r}; falling back to "
-                f"--dangerously-bypass-approvals-and-sandbox"
-            )
-        return ["--dangerously-bypass-approvals-and-sandbox"]
+    @staticmethod
+    def _build_summary_prompt(context_text: str, subject: str = "") -> str:
+        subject_block = f" for {subject}" if subject else ""
+        return (
+            "You are compressing prior Brad execution context"
+            f"{subject_block} into a restart handoff.\n"
+            "Write the result using exactly these headings and keep each one terse:\n"
+            "- Goal\n"
+            "- Current state\n"
+            "- What was tried\n"
+            "- Files / commands / tests\n"
+            "- Blockers / unknowns\n"
+            "- Next action\n\n"
+            "Rules:\n"
+            "- Be concrete and execution-oriented.\n"
+            "- Prefer exact issue titles, latest phase names, last step results, file names, commands, tests, PR numbers, and error text.\n"
+            "- If something is unknown, say unknown instead of guessing.\n"
+            "- Do not add a preamble, disclaimer, or closing sentence.\n\n"
+            "Context:\n"
+            "```\n"
+            f"{context_text}\n"
+            "```\n"
+        )
 
     @staticmethod
     def _read_codex_config_model(config_path: Path) -> Optional[str]:
@@ -248,6 +297,14 @@ class CodexCliHarness(AgentHarness):
         if config_model:
             return config_model
         return None
+
+    def _resolve_summarization_model_name(self) -> Optional[str]:
+        if self.summarization_model:
+            return self.summarization_model
+        env_model = os.environ.get("CODEX_SUMMARIZATION_MODEL")
+        if env_model and env_model.strip():
+            return env_model.strip()
+        return self._resolved_model_name
 
     @staticmethod
     def _build_prompt(system_prompt: str, task_prompt: str) -> str:

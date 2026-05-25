@@ -1,0 +1,9 @@
+key: DUMMY-42
+summary: Summarization smoke ticket
+labels: BradReview,dummy
+status: Open
+project: DUMMY
+updated: 2026-05-25T00:00:00+00:00
+
+This is a local-only ticket fixture.
+It exists to exercise the restart-summary path without touching Jira.
