@@ -317,16 +317,19 @@ td {
 
 tr:hover { background: #f7fafc; }
 
-.execution-row {
+.execution-row,
+.ticket-row {
     cursor: pointer;
 }
 
-.execution-row:focus {
+.execution-row:focus,
+.ticket-row:focus {
     outline: 2px solid var(--brad-primary-light);
     outline-offset: -2px;
 }
 
-.execution-row:hover {
+.execution-row:hover,
+.ticket-row:hover {
     background: #edf2f7;
 }
 

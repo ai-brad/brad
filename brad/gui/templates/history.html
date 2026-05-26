@@ -40,7 +40,7 @@
         {% for ex in executions %}
             <tr class="execution-row" data-execution-href="/execution/{{ ex.id }}" tabindex="0" role="link">
                 <td>{{ ex.id }}</td>
-                <td><a href="{{ jira_url }}/browse/{{ ex.issue_key }}" target="_blank" class="issue-link"><strong>{{ ex.issue_key }}</strong></a></td>
+                <td><a href="{{ ex.ticket_href }}" class="issue-link"><strong>{{ ex.issue_key }}</strong></a></td>
                 <td>{{ ex.issue_title[:50] }}{% if ex.issue_title|length > 50 %}…{% endif %}</td>
                 <td>{{ ex.action }}</td>
                 <td>{{ ex.model_name or '—' }}</td>
@@ -133,7 +133,7 @@ function refreshHistory() {
                 var tokens = (ex.total_prompt_tokens || 0) + (ex.total_completion_tokens || 0);
                 html += '<tr class="execution-row" data-execution-href="' + executionHref(ex) + '" tabindex="0" role="link">' +
                     '<td>' + ex.id + '</td>' +
-                    '<td><a href="' + JIRA_URL + '/browse/' + ex.issue_key + '" target="_blank" class="issue-link"><strong>' + ex.issue_key + '</strong></a></td>' +
+                    '<td><a href="' + (ex.ticket_href || ('/ticket/' + ex.issue_key)) + '" class="issue-link"><strong>' + ex.issue_key + '</strong></a></td>' +
                     '<td>' + truncate(ex.issue_title, 50) + '</td>' +
                     '<td>' + (ex.action || '') + '</td>' +
                     '<td>' + (ex.model_name || '—') + '</td>' +

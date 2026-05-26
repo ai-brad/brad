@@ -16,8 +16,8 @@
             <h1>Brad</h1>
         </a>
         <nav>
-            <a href="/" class="{% if request.path == '/' %}active{% endif %}">Dashboard</a>
-            <a href="/history" class="{% if request.path == '/history' %}active{% endif %}">History</a>
+            <a href="/" class="{% if request.path == '/' or request.path.startswith('/ticket/') or request.path.startswith('/execution/') %}active{% endif %}">Tickets</a>
+            <a href="/history" class="{% if request.path == '/history' %}active{% endif %}">Executions</a>
         </nav>
     </header>
     <main class="container">

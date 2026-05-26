@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}{{ ticket.issue_key }} — {{ ticket.issue_title or 'Ticket' }}{% endblock %}
+{% block content %}
+
+<div class="card">
+    <h2>
+        <a href="{{ jira_url }}/browse/{{ ticket.issue_key }}" target="_blank" class="issue-link">{{ ticket.issue_key }}</a>
+        {% if ticket.issue_title %} — {{ ticket.issue_title }}{% endif %}
+    </h2>
+    <div class="detail-meta" id="ticket-meta">
+        <div>
+            <strong>Status:</strong>
+            <span class="badge badge-{{ ticket.status_class }}" id="ticket-status-badge">{{ ticket.status_label }}</span>
+        </div>
+        <div><strong>Executions:</strong> <span id="ticket-execution-count">{{ ticket.execution_count }}</span></div>
+        <div><strong>Latest execution:</strong> {% if ticket.latest_execution_href %}<a href="{{ ticket.latest_execution_href }}">#{{ ticket.latest_execution_id }}</a>{% else %}—{% endif %}</div>
+        <div><strong>Latest action:</strong> <span id="ticket-latest-action">{{ ticket.latest_execution_action or '—' }}</span></div>
+        <div><strong>Latest model:</strong> <span id="ticket-latest-model">{{ ticket.latest_execution_model_name or '—' }}</span></div>
+        <div><strong>Last update:</strong> <span data-utc="{{ ticket.last_update }}">{{ ticket.last_update }}</span></div>
+        {% if ticket.latest_execution_phase %}
+        <div><strong>Latest phase:</strong> <span class="badge badge-running">{{ ticket.latest_execution_phase }}</span>{% if ticket.latest_execution_phase_detail %}<small> {{ ticket.latest_execution_phase_detail }}</small>{% endif %}</div>
+        {% endif %}
+        {% if ticket.latest_pr_number %}
+        <div><strong>Latest PR:</strong> <a href="{{ ticket.latest_pr_url or ('https://github.com/' ~ github_repo ~ '/pull/' ~ ticket.latest_pr_number) }}" target="_blank">PR #{{ ticket.latest_pr_number }}</a></div>
+        {% endif %}
+    </div>
+    <div class="stats-grid" id="ticket-stats">
+        <div class="stat-card">
+            <div class="stat-value" id="ticket-prompt">{{ "{:,}".format(ticket.total_prompt_tokens or 0) }}</div>
+            <div class="stat-label">Input Tokens</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="ticket-cached-prompt">{{ "{:,}".format(ticket.total_cached_prompt_tokens or 0) }}</div>
+            <div class="stat-label">Cached Input</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="ticket-completion">{{ "{:,}".format(ticket.total_completion_tokens or 0) }}</div>
+            <div class="stat-label">Completion Tokens</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value cost" id="ticket-cost"><a href="#cost-breakdown-card" style="color: inherit; text-decoration: none;">${{ "%.4f"|format(ticket.total_cost or 0) }}</a></div>
+            <div class="stat-label">Total Cost</div>
+        </div>
+    </div>
+</div>
+
+<div class="card" id="issue-control-card">
+    <h2>Issue Control</h2>
+    <div class="status-box {% if issue_control.state == 'stopped' %}stopped{% else %}idle{% endif %}" id="issue-control-status-box">
+        <span class="status-dot {% if issue_control.state == 'stopped' %}stopped{% else %}idle{% endif %}" id="issue-control-status-dot"></span>
+        <div id="issue-control-status-text">
+            {% if issue_control.state == 'stopped' %}
+            <strong>This ticket is stopped</strong>
+            {% if issue_control.reason %} — {{ issue_control.reason }}{% endif %}
+            {% else %}
+            <strong>This ticket is running</strong> — Brad may work on it
+            {% endif %}
+            <br>
+            <small>State: <span class="badge badge-{{ issue_control.state }}" id="issue-control-state-badge">{{ issue_control.state|upper }}</span></small>
+            {% if issue_control.updated_at %}
+            <small> · Updated: <span data-utc="{{ issue_control.updated_at }}">{{ issue_control.updated_at }}</span></small>
+            {% endif %}
+            {% if issue_control.updated_by %}
+            <br><small>Updated by: {{ issue_control.updated_by }}</small>
+            {% endif %}
+        </div>
+    </div>
+    <form class="control-form" method="post" action="/api/ticket/{{ ticket.issue_key }}/stop">
+        <label for="issue-control-reason"><strong>Stop reason</strong> <small>(optional)</small></label>
+        <input id="issue-control-reason" name="reason" type="text" placeholder="Stop work on this ticket" maxlength="200">
+        <div class="control-actions">
+            <button type="submit" class="danger-button">Stop this ticket</button>
+            <button type="submit" formaction="/api/ticket/{{ ticket.issue_key }}/resume" class="secondary-button">Resume this ticket</button>
+        </div>
+    </form>
+</div>
+
+<div class="card" id="cost-breakdown-card">
+    <h2>Ticket Cost Breakdown</h2>
+    <div id="cost-breakdown-container">
+    {% if ticket_cost_breakdown %}
+    <table>
+        <thead>
+            <tr>
+                <th>Phase</th>
+                <th>Steps</th>
+                <th>Non-cached Input</th>
+                <th>Cached Input</th>
+                <th>Output</th>
+                <th>Total Tokens</th>
+                <th>Cost</th>
+                <th>Share</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for row in ticket_cost_breakdown %}
+            <tr>
+                <td>{{ row.phase | replace('_', ' ') | title }}</td>
+                <td>{{ row.steps }}</td>
+                <td>{{ "{:,}".format(row.non_cached_prompt_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.cached_prompt_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.completion_tokens or 0) }}</td>
+                <td>{{ "{:,}".format(row.total_tokens or 0) }}</td>
+                <td class="cost">${{ "%.4f"|format(row.cost or 0) }}</td>
+                <td>{{ "%.1f"|format(row.cost_pct or 0) }}%</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><p>No ticket-level cost data recorded yet.</p></div>
+    {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <h2>Executions</h2>
+    <div id="ticket-executions-container">
+    {% if executions %}
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Action</th>
+                <th>Status</th>
+                <th>Model</th>
+                <th>Started</th>
+                <th>Finished</th>
+                <th>PR</th>
+                <th>Tokens</th>
+                <th>Cost</th>
+            </tr>
+        </thead>
+        <tbody id="ticket-executions-tbody">
+        {% for ex in executions %}
+            <tr class="execution-row" data-execution-href="/execution/{{ ex.id }}" tabindex="0" role="link">
+                <td><a href="/execution/{{ ex.id }}"><strong>{{ ex.id }}</strong></a></td>
+                <td>{{ ex.action }}</td>
+                <td><span class="badge badge-{{ ex.status }}">{{ ex.status_label }}</span></td>
+                <td>{{ ex.model_name or '—' }}</td>
+                <td><span data-utc="{{ ex.started_at }}">{{ ex.started_at[:16] }}</span></td>
+                <td><span data-utc="{{ ex.finished_at }}">{{ ex.finished_at[:16] if ex.finished_at else '—' }}</span></td>
+                <td>
+                    {% if ex.pr_number %}
+                    <a href="{{ ex.pr_url or ('https://github.com/' ~ github_repo ~ '/pull/' ~ ex.pr_number) }}" target="_blank">PR #{{ ex.pr_number }}</a>
+                    {% else %}—{% endif %}
+                </td>
+                <td>{{ "{:,}".format((ex.total_prompt_tokens or 0) + (ex.total_completion_tokens or 0)) }}</td>
+                <td class="cost">${{ "%.4f"|format(ex.total_cost or 0) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><p>No executions recorded yet.</p></div>
+    {% endif %}
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function wireExecutionTableClicks(tbody) {
+    if (!tbody || tbody.dataset.clickWired === '1') return;
+    tbody.dataset.clickWired = '1';
+    tbody.addEventListener('click', function(event) {
+        if (event.target.closest('a')) return;
+        var row = event.target.closest('tr[data-execution-href]');
+        if (!row) return;
+        window.location = row.dataset.executionHref;
+    });
+    tbody.addEventListener('keydown', function(event) {
+        var row = event.target.closest('tr[data-execution-href]');
+        if (!row) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            window.location = row.dataset.executionHref;
+        }
+    });
+}
+
+wireExecutionTableClicks(document.getElementById('ticket-executions-tbody'));
+</script>
+{% endblock %}

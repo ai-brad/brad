@@ -4,8 +4,9 @@
 
 <div class="card">
     <h2>
-        <a href="{{ jira_url }}/browse/{{ execution.issue_key }}" target="_blank" class="issue-link">{{ execution.issue_key }}</a>
+        <a href="/ticket/{{ execution.issue_key }}" class="issue-link">{{ execution.issue_key }}</a>
         {% if execution.issue_title %} — {{ execution.issue_title }}{% endif %}
+        <small> · <a href="{{ jira_url }}/browse/{{ execution.issue_key }}" target="_blank">Open in Jira</a></small>
     </h2>
     <div class="detail-meta" id="d-meta">
         <div>

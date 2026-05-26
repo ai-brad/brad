@@ -723,6 +723,119 @@ def get_executions_by_issue(issue_key: str) -> List[Dict]:
         return [dict(r) for r in rows]
 
 
+def get_ticket_overview(limit: int = 100) -> List[Dict]:
+    """Get one grouped row per ticket, ordered by running work first then recency."""
+    limit = max(1, int(limit or 0))
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                e.issue_key AS issue_key,
+                COUNT(*) AS execution_count,
+                SUM(COALESCE(e.total_prompt_tokens, 0)) AS total_prompt_tokens,
+                SUM(COALESCE(e.total_cached_prompt_tokens, 0)) AS total_cached_prompt_tokens,
+                SUM(COALESCE(e.total_completion_tokens, 0)) AS total_completion_tokens,
+                SUM(COALESCE(e.total_cost, 0.0)) AS total_cost,
+                MAX(COALESCE(e.finished_at, e.started_at)) AS last_update,
+                MAX(CASE WHEN e.status = 'running' THEN 1 ELSE 0 END) AS is_running,
+                (
+                    SELECT x.id
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_execution_id,
+                (
+                    SELECT x.status
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_execution_status,
+                (
+                    SELECT x.model_name
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_execution_model_name,
+                (
+                    SELECT x.action
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_execution_action,
+                (
+                    SELECT x.current_phase
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_execution_phase,
+                (
+                    SELECT x.current_phase_detail
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_execution_phase_detail,
+                (
+                    SELECT x.pr_number
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_pr_number,
+                (
+                    SELECT x.pr_url
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS latest_pr_url,
+                (
+                    SELECT NULLIF(x.issue_title, '')
+                      FROM executions x
+                     WHERE x.issue_key = e.issue_key
+                       AND COALESCE(x.issue_title, '') <> ''
+                     ORDER BY COALESCE(x.finished_at, x.started_at) DESC, x.id DESC
+                     LIMIT 1
+                ) AS issue_title,
+                COALESCE(ic.state, 'running') AS issue_control_state,
+                COALESCE(ic.reason, '') AS issue_control_reason,
+                COALESCE(ic.updated_at, '') AS issue_control_updated_at,
+                COALESCE(ic.updated_by, '') AS issue_control_updated_by
+              FROM executions e
+         LEFT JOIN issue_control ic ON ic.issue_key = e.issue_key
+          GROUP BY e.issue_key
+          ORDER BY is_running DESC, last_update DESC, e.issue_key ASC
+             LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_total_ticket_stats() -> Dict:
+    """Get aggregate stats for the ticket-centric dashboard."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(DISTINCT issue_key) AS total_tickets,
+                COUNT(*) AS total_executions,
+                COUNT(DISTINCT CASE WHEN status = 'running' THEN issue_key END) AS running_tickets,
+                SUM(total_prompt_tokens) AS total_prompt_tokens,
+                SUM(total_cached_prompt_tokens) AS total_cached_prompt_tokens,
+                SUM(total_completion_tokens) AS total_completion_tokens,
+                SUM(total_cost) AS total_cost
+              FROM executions
+            """
+        ).fetchone()
+        return dict(row) if row else {}
+
+
 def get_ticket_cost_breakdown(issue_key: str) -> List[Dict]:
     """Aggregate step costs across all executions for a Jira issue."""
     issue_key = (issue_key or "").strip()

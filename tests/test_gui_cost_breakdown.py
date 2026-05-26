@@ -10,6 +10,7 @@ from brad.gui.app import (
     build_ticket_cost_breakdown,
     build_execution_failure_context,
     decorate_execution,
+    decorate_ticket,
     format_execution_action,
     format_execution_status_label,
     create_app,
@@ -302,6 +303,102 @@ def test_api_executions_includes_display_fields(temp_db):
     assert row["issue_title"] == "Ticket title from Jira"
     assert row["action"] == "CI Fix"
     assert row["status_label"] == "RUNNING"
+    assert row["ticket_href"] == "/ticket/TEST-456"
+
+
+def test_dashboard_lists_tickets(temp_db):
+    execution_id = db.create_execution("TEST-DASH", "Dashboard ticket", cost_budget=150.0, issue_title="Dashboard Ticket")
+    db.finish_execution(execution_id, status="completed")
+
+    app = create_app(temp_db)
+    client = app.test_client()
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Tickets" in html
+    assert "Total Tickets" in html
+    assert "/ticket/TEST-DASH" in html
+
+
+def test_ticket_overview_groups_executions_and_prioritizes_running_tickets(temp_db):
+    completed_id = db.create_execution("TEST-A", "Completed ticket", cost_budget=150.0, issue_title="Ticket A")
+    completed_step = db.create_step(completed_id, "implementation", "Finished work")
+    db.finish_step(
+        completed_step,
+        status="completed",
+        prompt_tokens=100,
+        cached_prompt_tokens=10,
+        completion_tokens=5,
+        cost=0.5,
+        result_summary="done",
+    )
+    db.update_execution_costs(
+        completed_id,
+        prompt_tokens=100,
+        cached_prompt_tokens=10,
+        completion_tokens=5,
+        cost=0.5,
+    )
+    db.finish_execution(completed_id, status="completed")
+
+    running_id = db.create_execution("TEST-B", "Running ticket", cost_budget=150.0, issue_title="Ticket B")
+    running_step = db.create_step(running_id, "implementation", "Still running")
+    db.finish_step(
+        running_step,
+        status="completed",
+        prompt_tokens=200,
+        cached_prompt_tokens=20,
+        completion_tokens=10,
+        cost=0.75,
+        result_summary="in progress",
+    )
+    db.update_execution_costs(
+        running_id,
+        prompt_tokens=200,
+        cached_prompt_tokens=20,
+        completion_tokens=10,
+        cost=0.75,
+    )
+
+    rows = db.get_ticket_overview(limit=10)
+
+    assert [row["issue_key"] for row in rows] == ["TEST-B", "TEST-A"]
+    assert rows[0]["execution_count"] == 1
+    assert rows[0]["is_running"] == 1
+    assert rows[0]["latest_execution_id"] == running_id
+    assert rows[1]["latest_execution_status"] == "completed"
+    assert decorate_ticket(rows[1])["status_label"] == "DONE"
+
+
+def test_api_ticket_detail_includes_execution_history(temp_db):
+    first_id = db.create_execution("TEST-TICKET", "First pass", cost_budget=150.0, issue_title="Ticket Title", action="Implement")
+    db.finish_execution(first_id, status="completed", pr_number=321, pr_url="https://github.com/org/repo/pull/321")
+
+    second_id = db.create_execution("TEST-TICKET", "Second pass", cost_budget=150.0, issue_title="Ticket Title", action="Review")
+    second_step = db.create_step(second_id, "local_review", "Reviewing")
+    db.finish_step(second_step, status="completed", prompt_tokens=120, cached_prompt_tokens=20, completion_tokens=10, cost=0.8)
+    db.update_execution_costs(second_id, prompt_tokens=120, cached_prompt_tokens=20, completion_tokens=10, cost=0.8)
+    db.finish_execution(second_id, status="completed")
+
+    app = create_app(temp_db)
+    client = app.test_client()
+
+    api_resp = client.get("/api/ticket/TEST-TICKET")
+    assert api_resp.status_code == 200
+    payload = api_resp.get_json()
+    assert payload["ticket"]["issue_key"] == "TEST-TICKET"
+    assert payload["ticket"]["execution_count"] == 2
+    assert [ex["id"] for ex in payload["executions"]] == [second_id, first_id]
+    assert payload["issue_control"]["state"] == "running"
+
+    html_resp = client.get("/ticket/TEST-TICKET")
+    assert html_resp.status_code == 200
+    html = html_resp.get_data(as_text=True)
+    assert "Executions" in html
+    assert f"/execution/{first_id}" in html
+    assert f"/execution/{second_id}" in html
+    assert "/api/ticket/TEST-TICKET/stop" in html
 
 
 def test_api_execution_detail_includes_ticket_cost_breakdown(temp_db):

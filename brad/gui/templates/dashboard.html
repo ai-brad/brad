@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Dashboard{% endblock %}
+{% block title %}Tickets{% endblock %}
 
 {% block content %}
 
@@ -9,19 +9,20 @@
     <div class="status-box active">
         <span class="status-dot active"></span>
         <div>
-            <strong>Processing:</strong>
-            <a href="{{ jira_url }}/browse/{{ running.issue_key }}" target="_blank" class="issue-link">{{ running.issue_key }}</a>
-            {% if running.issue_title %} — {{ running.issue_title }}{% elif running.summary %} — {{ running.summary }}{% endif %}
+            <strong>Processing ticket:</strong>
+            <a href="{{ running.issue_href }}" class="issue-link"><strong>{{ running.issue_key }}</strong></a>
+            {% if running.issue_title %} — {{ running.issue_title }}{% endif %}
+            <small> · <a href="{{ jira_url }}/browse/{{ running.issue_key }}" target="_blank">Open in Jira</a></small>
             <br>
-            {% if running.model_name %}<small>Model: {{ running.model_name }}</small><br>{% endif %}
+            {% if running.latest_execution_model_name %}<small>Model: {{ running.latest_execution_model_name }}</small><br>{% endif %}
             <span id="current-phase-display">
-            {% if running.current_phase %}
-                <span class="badge badge-running">{{ running.current_phase }}</span>
-                {% if running.current_phase_detail %}<small> {{ running.current_phase_detail }}</small>{% endif %}
+            {% if running.latest_execution_phase %}
+                <span class="badge badge-running">{{ running.latest_execution_phase }}</span>
+                {% if running.latest_execution_phase_detail %}<small> {{ running.latest_execution_phase_detail }}</small>{% endif %}
             {% endif %}
             </span>
-            <br><small>Started: <span data-utc="{{ running.started_at }}">{{ running.started_at }}</span></small>
-            <small> · <a href="/execution/{{ running.id }}">Live Details →</a></small>
+            <br><small>Started: <span data-utc="{{ running.latest_started_at }}">{{ running.latest_started_at }}</span></small>
+            <small> · <a href="{{ running.latest_execution_href }}">Latest Execution →</a></small>
         </div>
     </div>
     {% else %}
@@ -34,16 +35,16 @@
 
 <div class="stats-grid" id="stats-grid">
     <div class="stat-card">
-        <div class="stat-value" id="stat-executions">{{ totals.total_executions or 0 }}</div>
-        <div class="stat-label">Total Executions</div>
+        <div class="stat-value" id="stat-tickets">{{ totals.total_tickets or 0 }}</div>
+        <div class="stat-label">Total Tickets</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-running-tickets">{{ totals.running_tickets or 0 }}</div>
+        <div class="stat-label">Running Tickets</div>
     </div>
     <div class="stat-card">
         <div class="stat-value" id="stat-prompt-tokens">{{ "{:,}".format(totals.total_prompt_tokens or 0) }}</div>
         <div class="stat-label">Input Tokens</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value" id="stat-cached-prompt-tokens">{{ "{:,}".format(totals.total_cached_prompt_tokens or 0) }}</div>
-        <div class="stat-label">Cached Input</div>
     </div>
     <div class="stat-card">
         <div class="stat-value" id="stat-completion-tokens">{{ "{:,}".format(totals.total_completion_tokens or 0) }}</div>
@@ -56,46 +57,46 @@
 </div>
 
 <div class="card">
-    <h2>Recent Executions</h2>
-    <div id="recent-table-container">
-    {% if recent %}
+    <h2>Tickets</h2>
+    <div id="ticket-table-container">
+    {% if tickets %}
     <table>
         <thead>
             <tr>
-                <th>Issue</th>
-                <th>Issue Title</th>
-                <th>Action</th>
-                <th>Model</th>
+                <th>Ticket</th>
+                <th>Title</th>
                 <th>Status</th>
-                <th>Last update</th>
+                <th>Latest action</th>
+                <th>Latest update</th>
+                <th>Executions</th>
                 <th>PR</th>
                 <th>Cost</th>
             </tr>
         </thead>
-        <tbody id="recent-tbody">
-        {% for ex in recent %}
-            <tr class="execution-row" data-execution-href="/execution/{{ ex.id }}" tabindex="0" role="link">
-                <td><a href="{{ jira_url }}/browse/{{ ex.issue_key }}" target="_blank" class="issue-link"><strong>{{ ex.issue_key }}</strong></a></td>
-                <td>{{ ex.issue_title[:60] }}{% if ex.issue_title|length > 60 %}…{% endif %}</td>
-                <td>{{ ex.action }}</td>
-                <td>{{ ex.model_name or '—' }}</td>
+        <tbody id="ticket-tbody">
+        {% for ticket in tickets %}
+            <tr class="ticket-row" data-ticket-href="{{ ticket.issue_href }}" tabindex="0" role="link">
+                <td><a href="{{ ticket.issue_href }}" class="issue-link"><strong>{{ ticket.issue_key }}</strong></a></td>
+                <td>{{ ticket.issue_title[:60] }}{% if ticket.issue_title|length > 60 %}…{% endif %}</td>
                 <td>
-                    <span class="badge badge-{{ ex.status }}">{{ ex.status_label }}</span>
+                    <span class="badge badge-{{ ticket.status_class }}">{{ ticket.status_label }}</span>
                 </td>
-                <td><span data-utc="{{ ex.last_update }}">{{ ex.last_update[:16] }}</span></td>
+                <td>{{ ticket.latest_execution_action or '—' }}</td>
+                <td><span data-utc="{{ ticket.last_update }}">{{ ticket.last_update[:16] }}</span></td>
+                <td>{{ ticket.execution_count }}</td>
                 <td>
-                    {% if ex.pr_number %}
-                    <a href="{{ ex.pr_url or ('https://github.com/' ~ github_repo ~ '/pull/' ~ ex.pr_number) }}" target="_blank">PR #{{ ex.pr_number }}</a>
+                    {% if ticket.latest_pr_number %}
+                    <a href="{{ ticket.latest_pr_url or ('https://github.com/' ~ github_repo ~ '/pull/' ~ ticket.latest_pr_number) }}" target="_blank">PR #{{ ticket.latest_pr_number }}</a>
                     {% else %}—{% endif %}
                 </td>
-                <td class="cost">${{ "%.4f"|format(ex.total_cost or 0) }}</td>
+                <td class="cost">${{ "%.4f"|format(ticket.total_cost or 0) }}</td>
             </tr>
         {% endfor %}
         </tbody>
     </table>
     {% else %}
     <div class="empty-state">
-        <p>No executions yet. Brad will record them here once it starts processing issues.</p>
+        <p>No tickets yet. Brad will record them here once it starts processing issues.</p>
     </div>
     {% endif %}
     </div>
@@ -112,7 +113,7 @@ function fmtNum(n) { return (n || 0).toLocaleString(); }
 function fmtCost(n) { return '$' + (n || 0).toFixed(2); }
 function fmtCost4(n) { return '$' + (n || 0).toFixed(4); }
 function truncate(s, n) { return s && s.length > n ? s.substring(0, n) + '…' : (s || ''); }
-function executionHref(ex) { return '/execution/' + ex.id; }
+function ticketHref(ticket) { return ticket.issue_href || ('/ticket/' + ticket.issue_key); }
 function escapeHtml(s) {
     return (s || '').replace(/[&<>"']/g, function(ch) {
         return ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[ch];
@@ -143,35 +144,35 @@ function controlStatusLabel(state) {
     return state.toUpperCase();
 }
 
-function wireExecutionTableClicks(tbody) {
+ function wireTicketTableClicks(tbody) {
     if (!tbody || tbody.dataset.clickWired === '1') return;
     tbody.dataset.clickWired = '1';
     tbody.addEventListener('click', function(event) {
         if (event.target.closest('a')) return;
-        var row = event.target.closest('tr[data-execution-href]');
+        var row = event.target.closest('tr[data-ticket-href]');
         if (!row) return;
-        window.location = row.dataset.executionHref;
+        window.location = row.dataset.ticketHref;
     });
     tbody.addEventListener('keydown', function(event) {
-        var row = event.target.closest('tr[data-execution-href]');
+        var row = event.target.closest('tr[data-ticket-href]');
         if (!row) return;
         if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
-            window.location = row.dataset.executionHref;
+            window.location = row.dataset.ticketHref;
         }
     });
 }
 
-wireExecutionTableClicks(document.getElementById('recent-tbody'));
+wireTicketTableClicks(document.getElementById('ticket-tbody'));
 
 function refreshDashboard() {
-    fetch('/api/dashboard')
+    fetch('/api/tickets')
         .then(function(r) { return r.json(); })
         .then(function(data) {
             // Update stats
-            document.getElementById('stat-executions').textContent = fmtNum(data.totals.total_executions);
+            document.getElementById('stat-tickets').textContent = fmtNum(data.totals.total_tickets);
+            document.getElementById('stat-running-tickets').textContent = fmtNum(data.totals.running_tickets);
             document.getElementById('stat-prompt-tokens').textContent = fmtNum(data.totals.total_prompt_tokens);
-            document.getElementById('stat-cached-prompt-tokens').textContent = fmtNum(data.totals.total_cached_prompt_tokens);
             document.getElementById('stat-completion-tokens').textContent = fmtNum(data.totals.total_completion_tokens);
             document.getElementById('stat-cost').textContent = fmtCost(data.totals.total_cost);
 
@@ -181,17 +182,18 @@ function refreshDashboard() {
                 sc.querySelector('.status-box').className = 'status-box active';
                 sc.querySelector('.status-dot').className = 'status-dot active';
                 var phaseHtml = '';
-                if (data.running.current_phase) {
-                    phaseHtml = '<span class="badge badge-running">' + data.running.current_phase + '</span>';
-                    if (data.running.current_phase_detail) phaseHtml += ' <small>' + data.running.current_phase_detail + '</small>';
+                if (data.running.latest_execution_phase) {
+                    phaseHtml = '<span class="badge badge-running">' + data.running.latest_execution_phase + '</span>';
+                    if (data.running.latest_execution_phase_detail) phaseHtml += ' <small>' + data.running.latest_execution_phase_detail + '</small>';
                 }
                 sc.querySelector('div > div').innerHTML =
-                    '<strong>Processing:</strong> <a href="' + JIRA_URL + '/browse/' + data.running.issue_key + '" target="_blank" class="issue-link">' + data.running.issue_key + '</a>' +
-                    (data.running.issue_title ? ' — ' + data.running.issue_title : (data.running.summary ? ' — ' + data.running.summary : '')) +
-                    (data.running.model_name ? '<br><small>Model: ' + data.running.model_name + '</small>' : '') +
+                    '<strong>Processing ticket:</strong> <a href="' + ticketHref(data.running) + '" class="issue-link"><strong>' + data.running.issue_key + '</strong></a>' +
+                    (data.running.issue_title ? ' — ' + data.running.issue_title : '') +
+                    ' <small>· <a href="' + JIRA_URL + '/browse/' + data.running.issue_key + '" target="_blank">Open in Jira</a></small>' +
+                    (data.running.latest_execution_model_name ? '<br><small>Model: ' + data.running.latest_execution_model_name + '</small>' : '') +
                     '<br><span id="current-phase-display">' + phaseHtml + '</span>' +
-                    '<br><small>Started: ' + fmtLocalTime(data.running.started_at) + '</small>' +
-                    ' <small>· <a href="/execution/' + data.running.id + '">Live Details →</a></small>';
+                    '<br><small>Started: ' + fmtLocalTime(data.running.latest_started_at) + '</small>' +
+                    (data.running.latest_execution_href ? ' <small>· <a href="' + data.running.latest_execution_href + '">Latest Execution →</a></small>' : '');
             } else {
                 sc.querySelector('.status-box').className = 'status-box idle';
                 sc.querySelector('.status-dot').className = 'status-dot idle';
@@ -199,26 +201,26 @@ function refreshDashboard() {
             }
 
             // Update table
-            if (data.recent && data.recent.length > 0) {
+            if (data.tickets && data.tickets.length > 0) {
                 var html = '';
-                data.recent.forEach(function(ex) {
-                    var prCell = ex.pr_number
-                        ? '<a href="' + (ex.pr_url || ('https://github.com/' + GITHUB_REPO + '/pull/' + ex.pr_number)) + '" target="_blank">PR #' + ex.pr_number + '</a>'
+                data.tickets.forEach(function(ticket) {
+                    var prCell = ticket.latest_pr_number
+                        ? '<a href="' + (ticket.latest_pr_url || ('https://github.com/' + GITHUB_REPO + '/pull/' + ticket.latest_pr_number)) + '" target="_blank">PR #' + ticket.latest_pr_number + '</a>'
                         : '—';
-                    html += '<tr class="execution-row" data-execution-href="' + executionHref(ex) + '" tabindex="0" role="link">' +
-                        '<td><a href="' + JIRA_URL + '/browse/' + ex.issue_key + '" target="_blank" class="issue-link"><strong>' + ex.issue_key + '</strong></a></td>' +
-                        '<td>' + truncate(ex.issue_title, 60) + '</td>' +
-                        '<td>' + (ex.action || '') + '</td>' +
-                        '<td>' + (ex.model_name || '—') + '</td>' +
-                        '<td><span class="badge ' + badgeClass(ex.status) + '">' + executionStatusLabel(ex.status) + '</span></td>' +
-                        '<td>' + fmtLocalTime(ex.last_update) + '</td>' +
+                    html += '<tr class="ticket-row" data-ticket-href="' + ticketHref(ticket) + '" tabindex="0" role="link">' +
+                        '<td><a href="' + ticketHref(ticket) + '" class="issue-link"><strong>' + ticket.issue_key + '</strong></a></td>' +
+                        '<td>' + truncate(ticket.issue_title, 60) + '</td>' +
+                        '<td><span class="badge ' + badgeClass(ticket.status_class) + '">' + ticket.status_label + '</span></td>' +
+                        '<td>' + (ticket.latest_execution_action || '—') + '</td>' +
+                        '<td>' + fmtLocalTime(ticket.last_update) + '</td>' +
+                        '<td>' + (ticket.execution_count || 0) + '</td>' +
                         '<td>' + prCell + '</td>' +
-                        '<td class="cost">' + fmtCost4(ex.total_cost) + '</td>' +
+                        '<td class="cost">' + fmtCost4(ticket.total_cost) + '</td>' +
                         '</tr>';
                 });
-                var tbody = document.getElementById('recent-tbody');
+                var tbody = document.getElementById('ticket-tbody');
                 if (tbody) tbody.innerHTML = html;
-                wireExecutionTableClicks(tbody);
+                wireTicketTableClicks(tbody);
             }
         })
         .catch(function(e) { console.error('Poll error:', e); });

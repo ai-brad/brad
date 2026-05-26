@@ -116,6 +116,7 @@ def _make_issue_title_fetcher() -> Optional[Callable[[str], str]]:
 def decorate_execution(execution, issue_title_fetcher: Optional[Callable[[str], str]] = None):
     """Add display-only fields used by the list views."""
     ex = dict(execution or {})
+    ex["issue_key"] = (ex.get("issue_key") or "").strip()
     issue_title = (ex.get("issue_title") or "").strip()
     ex["model_name"] = (ex.get("model_name") or "").strip()
     if not issue_title:
@@ -127,7 +128,50 @@ def decorate_execution(execution, issue_title_fetcher: Optional[Callable[[str], 
     ex["issue_title"] = issue_title
     ex["action"] = format_execution_action(ex)
     ex["status_label"] = format_execution_status_label(ex.get("status"))
+    ex["ticket_href"] = f"/ticket/{ex['issue_key']}" if ex["issue_key"] else ""
     return ex
+
+
+def decorate_ticket(ticket, issue_title_fetcher: Optional[Callable[[str], str]] = None):
+    """Add display-only fields used by the ticket overview."""
+    tk = dict(ticket or {})
+    tk["issue_key"] = (tk.get("issue_key") or "").strip()
+    tk["latest_execution_model_name"] = (tk.get("latest_execution_model_name") or "").strip()
+    tk["latest_execution_action"] = (tk.get("latest_execution_action") or "").strip()
+    tk["latest_execution_phase"] = (tk.get("latest_execution_phase") or "").strip()
+    tk["latest_execution_phase_detail"] = (tk.get("latest_execution_phase_detail") or "").strip()
+    tk["issue_control_state"] = (tk.get("issue_control_state") or "running").strip().lower() or "running"
+    tk["issue_control_reason"] = (tk.get("issue_control_reason") or "").strip()
+    tk["issue_control_updated_at"] = (tk.get("issue_control_updated_at") or "").strip()
+    tk["issue_control_updated_by"] = (tk.get("issue_control_updated_by") or "").strip()
+    issue_title = (tk.get("issue_title") or "").strip()
+    if not issue_title:
+        if issue_title_fetcher:
+            issue_title = issue_title_fetcher(tk.get("issue_key") or "")
+        if not issue_title:
+            issue_title = tk.get("issue_key") or ""
+    tk["issue_title"] = issue_title
+    tk["latest_execution_status"] = (tk.get("latest_execution_status") or "running").strip().lower() or "running"
+    is_running = bool(int(tk.get("is_running") or 0))
+    if tk["issue_control_state"] == "stopped":
+        display_status = "stopped"
+    elif is_running:
+        display_status = "running"
+    else:
+        display_status = tk["latest_execution_status"]
+    tk["status"] = display_status
+    tk["status_label"] = format_execution_status_label(display_status)
+    tk["status_class"] = display_status
+    tk["issue_control_state_label"] = tk["issue_control_state"].upper()
+    tk["issue_href"] = f"/ticket/{tk['issue_key']}" if tk["issue_key"] else ""
+    tk["latest_execution_href"] = f"/execution/{tk['latest_execution_id']}" if tk.get("latest_execution_id") else ""
+    tk["total_prompt_tokens"] = int(tk.get("total_prompt_tokens") or 0)
+    tk["total_cached_prompt_tokens"] = int(tk.get("total_cached_prompt_tokens") or 0)
+    tk["total_completion_tokens"] = int(tk.get("total_completion_tokens") or 0)
+    tk["total_cost"] = float(tk.get("total_cost") or 0.0)
+    tk["execution_count"] = int(tk.get("execution_count") or 0)
+    tk["is_running"] = is_running
+    return tk
 
 
 def build_execution_cost_breakdown(execution, steps):
@@ -274,6 +318,10 @@ def create_app(db_path: str = None) -> Flask:
     def _render_dashboard_redirect():
         return redirect(request.referrer or url_for("dashboard"))
 
+    def _render_ticket_redirect(issue_key: str):
+        issue_key = (issue_key or "").strip()
+        return redirect(request.referrer or url_for("ticket_detail", issue_key=issue_key))
+
     def _maybe_kill_worker():
         running = db.get_running_execution()
         if not running:
@@ -290,16 +338,106 @@ def create_app(db_path: str = None) -> Flask:
 
     @app.route("/")
     def dashboard():
-        running = db.get_running_execution()
-        running = decorate_execution(running, issue_title_fetcher) if running else None
-        recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
-        totals = db.get_total_costs()
+        tickets = [decorate_ticket(t, issue_title_fetcher) for t in db.get_ticket_overview(limit=10)]
+        running = tickets[0] if tickets and tickets[0].get("is_running") else None
+        totals = db.get_total_ticket_stats()
         return render_template(
             "dashboard.html",
             running=running,
-            recent=recent,
+            tickets=tickets,
             totals=totals,
         )
+
+    @app.route("/ticket/<issue_key>")
+    def ticket_detail(issue_key):
+        issue_key = (issue_key or "").strip()
+        executions = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_executions_by_issue(issue_key)]
+        if not executions:
+            return "Ticket not found", 404
+        executions.sort(key=lambda ex: (ex.get("started_at") or ""), reverse=True)
+        latest = executions[0]
+        issue_control = db.get_issue_control_state(issue_key)
+        ticket = decorate_ticket(
+            {
+                "issue_key": issue_key,
+                "issue_title": latest.get("issue_title") or latest.get("summary") or issue_key,
+                "execution_count": len(executions),
+                "total_prompt_tokens": sum(int(ex.get("total_prompt_tokens") or 0) for ex in executions),
+                "total_cached_prompt_tokens": sum(int(ex.get("total_cached_prompt_tokens") or 0) for ex in executions),
+                "total_completion_tokens": sum(int(ex.get("total_completion_tokens") or 0) for ex in executions),
+                "total_cost": sum(float(ex.get("total_cost") or 0.0) for ex in executions),
+                "last_update": max((ex.get("last_update") or ex.get("started_at") or "") for ex in executions),
+                "latest_execution_id": latest.get("id"),
+                "latest_execution_status": latest.get("status"),
+                "latest_execution_model_name": latest.get("model_name"),
+                "latest_execution_action": latest.get("action"),
+                "latest_execution_phase": latest.get("current_phase"),
+                "latest_execution_phase_detail": latest.get("current_phase_detail"),
+                "latest_pr_number": latest.get("pr_number"),
+                "latest_pr_url": latest.get("pr_url"),
+                "latest_started_at": latest.get("started_at"),
+                "latest_finished_at": latest.get("finished_at"),
+                "is_running": 1 if any((ex.get("status") == "running") for ex in executions) else 0,
+                "issue_control_state": issue_control.get("state") or "running",
+                "issue_control_reason": issue_control.get("reason") or "",
+                "issue_control_updated_at": issue_control.get("updated_at") or "",
+                "issue_control_updated_by": issue_control.get("updated_by") or "",
+            },
+            issue_title_fetcher,
+        )
+        ticket_cost_breakdown = build_ticket_cost_breakdown(issue_key)
+        return render_template(
+            "ticket_overview.html",
+            ticket=ticket,
+            executions=executions,
+            ticket_cost_breakdown=ticket_cost_breakdown,
+            issue_control=issue_control,
+        )
+
+    @app.route("/api/ticket/<issue_key>")
+    def api_ticket_detail(issue_key):
+        issue_key = (issue_key or "").strip()
+        executions = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_executions_by_issue(issue_key)]
+        if not executions:
+            return jsonify({"error": "not found"}), 404
+        executions.sort(key=lambda ex: (ex.get("started_at") or ""), reverse=True)
+        latest = executions[0]
+        issue_control = db.get_issue_control_state(issue_key)
+        ticket = decorate_ticket(
+            {
+                "issue_key": issue_key,
+                "issue_title": latest.get("issue_title") or latest.get("summary") or issue_key,
+                "execution_count": len(executions),
+                "total_prompt_tokens": sum(int(ex.get("total_prompt_tokens") or 0) for ex in executions),
+                "total_cached_prompt_tokens": sum(int(ex.get("total_cached_prompt_tokens") or 0) for ex in executions),
+                "total_completion_tokens": sum(int(ex.get("total_completion_tokens") or 0) for ex in executions),
+                "total_cost": sum(float(ex.get("total_cost") or 0.0) for ex in executions),
+                "last_update": max((ex.get("last_update") or ex.get("started_at") or "") for ex in executions),
+                "latest_execution_id": latest.get("id"),
+                "latest_execution_status": latest.get("status"),
+                "latest_execution_model_name": latest.get("model_name"),
+                "latest_execution_action": latest.get("action"),
+                "latest_execution_phase": latest.get("current_phase"),
+                "latest_execution_phase_detail": latest.get("current_phase_detail"),
+                "latest_pr_number": latest.get("pr_number"),
+                "latest_pr_url": latest.get("pr_url"),
+                "latest_started_at": latest.get("started_at"),
+                "latest_finished_at": latest.get("finished_at"),
+                "is_running": 1 if any((ex.get("status") == "running") for ex in executions) else 0,
+                "issue_control_state": issue_control.get("state") or "running",
+                "issue_control_reason": issue_control.get("reason") or "",
+                "issue_control_updated_at": issue_control.get("updated_at") or "",
+                "issue_control_updated_by": issue_control.get("updated_by") or "",
+            },
+            issue_title_fetcher,
+        )
+        ticket_cost_breakdown = build_ticket_cost_breakdown(issue_key)
+        return jsonify({
+            "ticket": ticket,
+            "executions": executions,
+            "ticket_cost_breakdown": ticket_cost_breakdown,
+            "issue_control": issue_control,
+        })
 
     @app.route("/history")
     def history():
@@ -339,6 +477,19 @@ def create_app(db_path: str = None) -> Flask:
         return jsonify({
             "backend_running": running is not None,
             "current_issue": running["issue_key"] if running else None,
+            "current_ticket": running["issue_key"] if running else None,
+            "totals": totals,
+            "ticket_totals": db.get_total_ticket_stats(),
+        })
+
+    @app.route("/api/tickets")
+    def api_tickets():
+        tickets = [decorate_ticket(t, issue_title_fetcher) for t in db.get_ticket_overview(limit=200)]
+        running = tickets[0] if tickets and tickets[0].get("is_running") else None
+        totals = db.get_total_ticket_stats()
+        return jsonify({
+            "running": running,
+            "tickets": tickets,
             "totals": totals,
         })
 
@@ -347,11 +498,14 @@ def create_app(db_path: str = None) -> Flask:
         running = db.get_running_execution()
         running = decorate_execution(running, issue_title_fetcher) if running else None
         recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
+        tickets = [decorate_ticket(t, issue_title_fetcher) for t in db.get_ticket_overview(limit=10)]
         totals = db.get_total_costs()
         return jsonify({
             "running": running,
             "recent": recent,
+            "tickets": tickets,
             "totals": totals,
+            "ticket_totals": db.get_total_ticket_stats(),
         })
 
     @app.route("/api/executions")
@@ -408,6 +562,32 @@ def create_app(db_path: str = None) -> Flask:
         if request.is_json:
             return jsonify({"control": control})
         return _render_dashboard_redirect()
+
+    @app.route("/api/ticket/<issue_key>/stop", methods=["POST"])
+    def api_ticket_stop(issue_key):
+        issue_key = (issue_key or "").strip()
+        if not issue_key:
+            return jsonify({"error": "issue_key required"}), 400
+        payload = request.get_json(silent=True) or {}
+        reason = (request.form.get("reason") or payload.get("reason") or "").strip()
+        updated_by = request.remote_addr or "dashboard"
+        control = db.set_issue_control_state(issue_key, "stopped", reason=reason, updated_by=updated_by)
+        if request.is_json:
+            return jsonify({"control": control})
+        return _render_ticket_redirect(issue_key)
+
+    @app.route("/api/ticket/<issue_key>/resume", methods=["POST"])
+    def api_ticket_resume(issue_key):
+        issue_key = (issue_key or "").strip()
+        if not issue_key:
+            return jsonify({"error": "issue_key required"}), 400
+        payload = request.get_json(silent=True) or {}
+        reason = (request.form.get("reason") or payload.get("reason") or "").strip()
+        updated_by = request.remote_addr or "dashboard"
+        control = db.set_issue_control_state(issue_key, "running", reason=reason, updated_by=updated_by)
+        if request.is_json:
+            return jsonify({"control": control})
+        return _render_ticket_redirect(issue_key)
 
     @app.route("/api/model-costs")
     def api_model_costs():
