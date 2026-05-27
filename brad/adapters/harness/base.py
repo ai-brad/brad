@@ -51,6 +51,7 @@ class AgentHarness(ABC):
         task_prompt: str,
         repo_path: str,
         system_prompt: str = "",
+        model: Optional[str] = None,
     ) -> LLMResult:
         """Run an agentic coding task.
 
@@ -58,6 +59,7 @@ class AgentHarness(ABC):
             task_prompt: The task description / user-role prompt.
             repo_path: Absolute path to the repository the agent operates on.
             system_prompt: Optional system/developer prompt (e.g. codebase map).
+            model: Optional model override for this specific run.
 
         Returns:
             :class:`LLMResult` with the agent's final text, an opaque

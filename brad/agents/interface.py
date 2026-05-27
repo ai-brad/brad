@@ -62,6 +62,7 @@ class AIAgentInterface:
         repo_path: str,
         iteration: int,
         continuation_context: str = "",
+        model: Optional[str] = None,
     ) -> Dict:
         self.logger.info(f"Requirements analysis: {issue_key} (iteration {iteration})")
         prompt = self._build_requirements_prompt(issue_key, description, attachment_paths, iteration)
@@ -70,6 +71,7 @@ class AIAgentInterface:
             prompt,
             repo_path,
             system_prompt=self._merge_system_prompt(codebase_map, continuation_context),
+            model=model,
         )
         parsed = self._parse_requirements_response(result.text)
         parsed["_response_id"] = result.response_id
@@ -87,6 +89,7 @@ class AIAgentInterface:
         dev_instructions: str = "",
         existing_pr: Optional[int] = None,
         continuation_context: str = "",
+        model: Optional[str] = None,
     ) -> Dict:
         self.logger.info(f"Implementation: {issue_key} (iteration {iteration})")
         pre_search = self._pre_search_codebase(description, repo_path)
@@ -96,6 +99,7 @@ class AIAgentInterface:
             prompt,
             repo_path,
             system_prompt=self._merge_system_prompt(codebase_map, continuation_context),
+            model=model,
         )
         parsed = self._parse_implementation_response(result.text)
         parsed["_response_id"] = result.response_id
@@ -113,6 +117,7 @@ class AIAgentInterface:
         iteration: int,
         dev_instructions: str = "",
         continuation_context: str = "",
+        model: Optional[str] = None,
     ) -> Dict:
         self.logger.info(f"Review fix: {issue_key} PR#{pr_number} (iteration {iteration})")
         prompt = self._build_review_fix_prompt(issue_key, description, review_comments, pr_number, iteration, dev_instructions)
@@ -121,6 +126,7 @@ class AIAgentInterface:
             prompt,
             repo_path,
             system_prompt=self._merge_system_prompt(codebase_map, continuation_context),
+            model=model,
         )
         parsed = self._parse_review_fix_response(result.text)
         parsed["_response_id"] = result.response_id
@@ -140,6 +146,7 @@ class AIAgentInterface:
         failed_test_target: Optional[str] = None,
         dev_instructions: str = "",
         continuation_context: str = "",
+        model: Optional[str] = None,
     ) -> Dict:
         self.logger.info(f"CI fix: {issue_key} PR#{pr_number} (iteration {iteration})")
         prompt = self._build_ci_fix_prompt(
@@ -151,6 +158,7 @@ class AIAgentInterface:
             prompt,
             repo_path,
             system_prompt=self._merge_system_prompt(codebase_map, continuation_context),
+            model=model,
         )
         parsed = self._parse_ci_fix_response(result.text)
         parsed["_response_id"] = result.response_id
@@ -166,6 +174,7 @@ class AIAgentInterface:
         iteration: int,
         dev_instructions: str = "",
         continuation_context: str = "",
+        model: Optional[str] = None,
     ) -> Dict:
         """Drive AI-only resolution of a rebase conflict.
 
@@ -181,6 +190,7 @@ class AIAgentInterface:
         result = self.harness.run(
             prompt, repo_path,
             system_prompt=self._merge_system_prompt(codebase_map, continuation_context),
+            model=model,
         )
         parsed = self._parse_conflict_resolution_response(result.text)
         parsed["_response_id"] = result.response_id
@@ -195,10 +205,11 @@ class AIAgentInterface:
         repo_path: str,
         branch_name: str,
         continuation_context: str = "",
+        model: Optional[str] = None,
     ) -> Dict:
         self.logger.info(f"Local review: {issue_key} on branch {branch_name}")
         prompt = self._build_local_review_prompt(issue_key, description, diff, branch_name)
-        result = self.harness.run(prompt, repo_path, system_prompt=self._merge_system_prompt("", continuation_context))
+        result = self.harness.run(prompt, repo_path, system_prompt=self._merge_system_prompt("", continuation_context), model=model)
         parsed = self._parse_local_review_response(result.text)
         parsed["_usage"] = result.usage
         return parsed
@@ -213,6 +224,7 @@ class AIAgentInterface:
         iteration: int,
         dev_instructions: str = "",
         continuation_context: str = "",
+        model: Optional[str] = None,
     ) -> Dict:
         self.logger.info(f"Local review fix: {issue_key} on branch {branch_name} (iteration {iteration})")
         prompt = self._build_local_review_fix_prompt(issue_key, description, review_feedback, branch_name, iteration, dev_instructions)
@@ -221,6 +233,7 @@ class AIAgentInterface:
             prompt,
             repo_path,
             system_prompt=self._merge_system_prompt(codebase_map, continuation_context),
+            model=model,
         )
         parsed = self._parse_local_review_fix_response(result.text)
         parsed["_response_id"] = result.response_id

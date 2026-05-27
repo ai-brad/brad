@@ -59,6 +59,41 @@ def test_watch_ci_after_push_synthesizes_state_with_jira_goal(
     assert "get_message_details_batch" in state.description
 
 
+def test_watch_ci_after_push_canonicalizes_slugged_branch_name(
+    temp_git_repo, monkeypatch
+):
+    orchestrator, _ = make_orchestrator(temp_git_repo)
+    orchestrator.ticketing.fetch_issue = Mock(
+        return_value={
+            "fields": {
+                "summary": "Wire batch endpoint",
+                "description": "Make get_message_details_batch return one row per id.",
+            }
+        }
+    )
+    _stub_db(monkeypatch)
+
+    captured = {}
+
+    orchestrator._handle_ci_monitoring = lambda state: captured.setdefault(
+        "state", state
+    )
+
+    orchestrator._watch_ci_after_push(
+        pr_number=2355,
+        branch_name="DEV-3837-add-bea-repo-agents-and-bootstrap-guidance",
+    )
+
+    assert orchestrator.ticketing.fetch_issue.call_args_list == [
+        (("DEV-3837",), {}),
+        (("DEV-3837",), {}),
+    ]
+    state = captured["state"]
+    assert state.issue_key == "DEV-3837"
+    assert state.branch_name == "DEV-3837-add-bea-repo-agents-and-bootstrap-guidance"
+    assert state.execution_id == 99
+
+
 def test_watch_ci_after_push_survives_jira_failure(temp_git_repo, monkeypatch):
     orchestrator, _ = make_orchestrator(temp_git_repo)
     orchestrator.ticketing.fetch_issue = Mock(side_effect=RuntimeError("jira down"))

@@ -413,6 +413,39 @@ class TestOrchestratorPhaseManagement:
         assert execution["total_prompt_tokens"] == 3000
         assert execution["total_completion_tokens"] == 1300
 
+    def test_backfill_zero_cost_executions_only_updates_finished_rows(self, temp_db):
+        """Only finished zero-cost executions should be backfilled."""
+        completed_id = db.create_execution("TEST-BACKFILL-DONE", "Done issue", model_name="gpt-5.4")
+        db.update_execution_costs(
+            completed_id,
+            prompt_tokens=2000,
+            cached_prompt_tokens=1000,
+            completion_tokens=500,
+            cost=0.0,
+        )
+        db.finish_execution(completed_id, status="completed")
+
+        running_id = db.create_execution("TEST-BACKFILL-RUNNING", "Running issue", model_name="gpt-5.4")
+        db.update_execution_costs(
+            running_id,
+            prompt_tokens=2000,
+            cached_prompt_tokens=1000,
+            completion_tokens=500,
+            cost=0.0,
+        )
+
+        updates = db.backfill_zero_cost_executions()
+
+        assert len(updates) == 1
+        assert updates[0]["id"] == completed_id
+        assert updates[0]["cost"] == pytest.approx(0.01025)
+
+        completed = db.get_execution(completed_id)
+        assert completed["total_cost"] == pytest.approx(0.01025)
+
+        running = db.get_execution(running_id)
+        assert running["total_cost"] == 0.0
+
 
 class TestRealWorkflows:
     """Test real workflow patterns without extensive mocking."""

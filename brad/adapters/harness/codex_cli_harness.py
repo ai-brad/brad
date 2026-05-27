@@ -95,9 +95,12 @@ class CodexCliHarness(AgentHarness):
         task_prompt: str,
         repo_path: str,
         system_prompt: str = "",
+        model: Optional[str] = None,
     ) -> LLMResult:
         full_prompt = self._build_prompt(system_prompt, task_prompt)
-        return self._run_exec(full_prompt, repo_path, task_preview=task_prompt[:300], model=self.model, approval_flags=self._approval_flags())
+        # Use the provided model override, or fall back to the configured model
+        effective_model = model if model is not None else self.model
+        return self._run_exec(full_prompt, repo_path, task_preview=task_prompt[:300], model=effective_model, approval_flags=self._approval_flags())
 
     def summarize_context(self, context_text: str, repo_path: str, subject: str = "") -> str:
         """Compact prior activity into a restart-friendly summary."""

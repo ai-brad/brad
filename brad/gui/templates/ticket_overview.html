@@ -9,7 +9,7 @@
     </h2>
     <div class="detail-meta" id="ticket-meta">
         <div>
-            <strong>Status:</strong>
+            <strong>Execution:</strong>
             <span class="badge badge-{{ ticket.status_class }}" id="ticket-status-badge">{{ ticket.status_label }}</span>
         </div>
         <div><strong>Executions:</strong> <span id="ticket-execution-count">{{ ticket.execution_count }}</span></div>
@@ -21,7 +21,7 @@
         <div><strong>Latest phase:</strong> <span class="badge badge-running">{{ ticket.latest_execution_phase }}</span>{% if ticket.latest_execution_phase_detail %}<small> {{ ticket.latest_execution_phase_detail }}</small>{% endif %}</div>
         {% endif %}
         {% if ticket.latest_pr_number %}
-        <div><strong>Latest PR:</strong> <a href="{{ ticket.latest_pr_url or ('https://github.com/' ~ github_repo ~ '/pull/' ~ ticket.latest_pr_number) }}" target="_blank">PR #{{ ticket.latest_pr_number }}</a></div>
+        <div><strong>Latest PR:</strong> <a href="{{ ticket.latest_pr_url or ('https://github.com/' ~ github_repo ~ '/pull/' ~ ticket.latest_pr_number) }}" target="_blank">PR #{{ ticket.latest_pr_number }}</a>{% if ticket.latest_pr_state_label %} <span class="badge {{ ticket.latest_pr_badge_class }}">{{ ticket.latest_pr_state_label }}</span>{% endif %}</div>
         {% endif %}
     </div>
     <div class="stats-grid" id="ticket-stats">

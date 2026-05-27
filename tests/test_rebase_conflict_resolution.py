@@ -94,6 +94,44 @@ def test_happy_path_resolves_pushes_and_watches_ci(orch):
     orch.repo.abort_rebase.assert_not_called()
 
 
+def test_happy_path_canonicalizes_slugged_branch_name(orch):
+    """Slugged branch names should still map to the Jira key."""
+    orch.repo.read_conflicted_file.return_value = "no markers here"
+    orch.repo.list_unmerged_files.return_value = ["foo.py"]
+    orch.repo.show_stage_blob.return_value = ""
+    orch.repo.blame_range.return_value = ""
+    orch.repo.log_messages.return_value = ""
+    orch.repo.continue_rebase.return_value = {"rebased": True}
+    orch.repo.force_push_with_lease.return_value = {"pushed": True}
+    orch.agent.invoke_conflict_resolution.return_value = _ai_resolved()
+    orch.ticketing.fetch_issue.return_value = {
+        "fields": {"summary": "Wire batch endpoint"}
+    }
+
+    with patch("brad.orchestrator.db") as fake_db:
+        fake_db.create_execution.return_value = 1
+        fake_db.create_step.return_value = 11
+
+        orch._resolve_rebase_conflicts(
+            pr_number=42,
+            branch_name="DEV-3837-add-bea-repo-agents-and-bootstrap-guidance",
+            base_branch="main",
+            conflicted_files=["foo.py"],
+        )
+
+    assert fake_db.create_execution.call_args[0][0] == "DEV-3837"
+    assert orch.ticketing.fetch_issue.call_args_list == [
+        (("DEV-3837",), {}),
+        (("DEV-3837",), {}),
+    ]
+    orch.repo.force_push_with_lease.assert_called_once_with(
+        "DEV-3837-add-bea-repo-agents-and-bootstrap-guidance"
+    )
+    orch._watch_ci_after_push.assert_called_once_with(
+        42, "DEV-3837-add-bea-repo-agents-and-bootstrap-guidance"
+    )
+
+
 def test_agent_stuck_aborts_and_comments(orch):
     orch.agent.invoke_conflict_resolution.return_value = _ai_stuck("dunno")
 

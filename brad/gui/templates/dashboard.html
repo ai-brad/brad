@@ -65,7 +65,7 @@
             <tr>
                 <th>Ticket</th>
                 <th>Title</th>
-                <th>Status</th>
+                <th>Execution</th>
                 <th>Latest action</th>
                 <th>Latest update</th>
                 <th>Executions</th>
@@ -87,6 +87,9 @@
                 <td>
                     {% if ticket.latest_pr_number %}
                     <a href="{{ ticket.latest_pr_url or ('https://github.com/' ~ github_repo ~ '/pull/' ~ ticket.latest_pr_number) }}" target="_blank">PR #{{ ticket.latest_pr_number }}</a>
+                    {% if ticket.latest_pr_state_label %}
+                    <br><span class="badge {{ ticket.latest_pr_badge_class }}">{{ ticket.latest_pr_state_label }}</span>
+                    {% endif %}
                     {% else %}—{% endif %}
                 </td>
                 <td class="cost">${{ "%.4f"|format(ticket.total_cost or 0) }}</td>
@@ -205,7 +208,8 @@ function refreshDashboard() {
                 var html = '';
                 data.tickets.forEach(function(ticket) {
                     var prCell = ticket.latest_pr_number
-                        ? '<a href="' + (ticket.latest_pr_url || ('https://github.com/' + GITHUB_REPO + '/pull/' + ticket.latest_pr_number)) + '" target="_blank">PR #' + ticket.latest_pr_number + '</a>'
+                        ? '<a href="' + (ticket.latest_pr_url || ('https://github.com/' + GITHUB_REPO + '/pull/' + ticket.latest_pr_number)) + '" target="_blank">PR #' + ticket.latest_pr_number + '</a>' +
+                          (ticket.latest_pr_state_label ? '<br><span class="badge ' + (ticket.latest_pr_badge_class || '') + '">' + ticket.latest_pr_state_label + '</span>' : '')
                         : '—';
                     html += '<tr class="ticket-row" data-ticket-href="' + ticketHref(ticket) + '" tabindex="0" role="link">' +
                         '<td><a href="' + ticketHref(ticket) + '" class="issue-link"><strong>' + ticket.issue_key + '</strong></a></td>' +

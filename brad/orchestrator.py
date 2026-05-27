@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 from brad.logging_config import get_logger
 from brad.config import Config
+from brad.conflict_context import extract_jira_key
 from brad.adapters.ticketing import build_ticketing_adapter
 from brad.adapters.code_repository.github_adapter import GitHubAdapter
 from brad.adapters.ci_cd.github_actions_adapter import GitHubActionsAdapter
@@ -85,6 +86,11 @@ class BradOrchestrator:
     def _maybe_text(value) -> str:
         return value.strip() if isinstance(value, str) else ""
 
+    @staticmethod
+    def _canonical_issue_key(issue_key: str) -> str:
+        extracted = extract_jira_key(issue_key or "")
+        return extracted or (issue_key or "").strip()
+
     def _summarization_model_name(self) -> str:
         harness = self.agent.harness
         return (
@@ -147,6 +153,7 @@ class BradOrchestrator:
         metrics: Optional[Dict] = None,
         model_name: Optional[str] = None,
     ) -> None:
+        issue_key = self._canonical_issue_key(issue_key)
         metrics = metrics or self._summary_usage_metrics(usage)
         model_name = (model_name or self._summarization_model_name()).strip()
         try:
@@ -181,6 +188,7 @@ class BradOrchestrator:
                 self.logger.debug(f"Could not persist execution summary metadata for {issue_key}: {e}")
 
     def _get_issue_continuation_summary_record(self, issue_key: str) -> Dict:
+        issue_key = self._canonical_issue_key(issue_key)
         try:
             stored = db.get_issue_context_summary(str(self.repo.repo_path), issue_key)
         except Exception as e:
@@ -189,6 +197,7 @@ class BradOrchestrator:
         return stored or {}
 
     def _load_issue_continuation_summary(self, issue_key: str) -> str:
+        issue_key = self._canonical_issue_key(issue_key)
         stored = self._get_issue_continuation_summary_record(issue_key)
         summary = self._maybe_text(stored.get("summary"))
         return summary
@@ -200,6 +209,7 @@ class BradOrchestrator:
         source: str,
         execution_id: Optional[int] = None,
     ) -> str:
+        issue_key = self._canonical_issue_key(issue_key)
         seed_text = (seed_text or "").strip()
         if not seed_text:
             return ""
@@ -231,6 +241,7 @@ class BradOrchestrator:
         issue_key: str,
         execution_id: Optional[int] = None,
     ) -> str:
+        issue_key = self._canonical_issue_key(issue_key)
         stored_record = self._get_issue_continuation_summary_record(issue_key)
         stored = self._maybe_text(stored_record.get("summary"))
         if stored:
@@ -262,6 +273,7 @@ class BradOrchestrator:
         source: str,
         execution_id: Optional[int] = None,
     ) -> str:
+        issue_key = self._canonical_issue_key(issue_key)
         current = self._load_issue_continuation_summary(issue_key)
         note = self._maybe_text(response.get("summary")) or self._maybe_text(response.get("message"))
         seed_parts = [part for part in (current, note) if part]
@@ -609,7 +621,9 @@ class BradOrchestrator:
         """
         from brad import conflict_context as cc
 
-        if self._stop_requested(branch_name):
+        issue_key = self._canonical_issue_key(branch_name)
+
+        if self._stop_requested(issue_key):
             self.logger.info(f"PR #{pr_number}: stop requested before rebase conflict resolution")
             self.repo.abort_rebase()
             return
@@ -629,9 +643,9 @@ class BradOrchestrator:
             return
 
         try:
-            issue_title = self._fetch_issue_title(branch_name)
+            issue_title = self._fetch_issue_title(issue_key)
             execution_id = db.create_execution(
-                branch_name,
+                issue_key,
                 f"Rebase conflict resolution for PR #{pr_number}",
                 cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
                 issue_title=issue_title,
@@ -643,10 +657,10 @@ class BradOrchestrator:
             execution_id = 0
 
         current_files = list(conflicted_files)
-        continuation_summary = self._build_issue_continuation_summary(branch_name, execution_id=execution_id)
+        continuation_summary = self._build_issue_continuation_summary(issue_key, execution_id=execution_id)
 
         for iteration in range(1, self.MAX_CONFLICT_ITERATIONS + 1):
-            if self._stop_requested(branch_name):
+            if self._stop_requested(issue_key):
                 self.logger.info(f"PR #{pr_number}: stop requested during rebase conflict resolution")
                 self.repo.abort_rebase()
                 return
@@ -680,6 +694,7 @@ class BradOrchestrator:
                 iteration=iteration,
                 dev_instructions=self._repo_dev_instructions,
                 continuation_context=continuation_summary,
+                model=self._execution_model_name(),
             )
 
             usage = response.get("_usage")
@@ -702,14 +717,14 @@ class BradOrchestrator:
 
             summary_source = f"rebase_conflict_resolution iteration {iteration}"
             state_summary = self._refresh_issue_continuation_summary(
-                branch_name,
+                issue_key,
                 response,
                 summary_source,
                 execution_id=execution_id,
             )
             if state_summary:
                 continuation_summary = state_summary
-                self.logger.debug(f"Updated continuation summary for {branch_name} after conflict iteration {iteration}")
+                self.logger.debug(f"Updated continuation summary for {issue_key} after conflict iteration {iteration}")
 
             action = response.get("action")
             if action == "stuck" or action == "error":
@@ -733,7 +748,7 @@ class BradOrchestrator:
                 return
 
             # Verify the agent did its job before continuing the rebase.
-            if self._stop_requested(branch_name):
+            if self._stop_requested(issue_key):
                 self.logger.info(f"PR #{pr_number}: stop requested before continuing rebase")
                 self.repo.abort_rebase()
                 return
@@ -1262,6 +1277,7 @@ class BradOrchestrator:
         fall over because Jira is flaky or the branch name doesn't map to a
         real issue.
         """
+        issue_key = self._canonical_issue_key(issue_key)
         try:
             issue = self.ticketing.fetch_issue(issue_key)
         except Exception as e:
@@ -1286,6 +1302,7 @@ class BradOrchestrator:
 
     def _fetch_issue_title(self, issue_key: str) -> str:
         """Best-effort: fetch just the Jira issue title for UI traceability."""
+        issue_key = self._canonical_issue_key(issue_key)
         try:
             issue = self.ticketing.fetch_issue(issue_key)
         except Exception as e:
@@ -1298,6 +1315,7 @@ class BradOrchestrator:
 
     def _summarize_prior_activity(self, issue_key: str, max_chars: int = 1500) -> str:
         """Build a short bullet-list digest of prior brad executions/steps for this issue."""
+        issue_key = self._canonical_issue_key(issue_key)
         try:
             executions = db.get_executions_by_issue(issue_key)
         except Exception as e:
@@ -1386,13 +1404,12 @@ class BradOrchestrator:
         to comments, pushes a fix, and then walks away even if the new commit
         breaks the pipeline.
         """
-        issue_key = branch_name
+        issue_key = self._canonical_issue_key(branch_name)
         if self._stop_requested(issue_key):
             self.logger.info(f"PR #{pr_number}: stop requested before CI watch")
             return
-        # Brad's branches are named after the Jira issue key, so this is a
-        # sensible default. If the convention ever changes this still works
-        # for traceability — Jira just won't recognize the comment target.
+        # Use the embedded Jira key when branches are slugged, e.g.
+        # DEV-3837-add-bea-repo-agents-and-bootstrap-guidance.
 
         # Recover the original goal so the CI-fix agent isn't blind to intent.
         goal_text = self._fetch_issue_goal(issue_key)
@@ -1593,6 +1610,7 @@ class BradOrchestrator:
                 repo_path=str(self.repo.repo_path),
                 iteration=state.clarification_count,
                 continuation_context=state.continuation_summary,
+                model=self._execution_model_name(),
             )
             self._record_step(state.execution_id, "requirements", response)
             state.continuation_summary = self._refresh_issue_continuation_summary(
@@ -1649,6 +1667,7 @@ class BradOrchestrator:
             dev_instructions=self._repo_dev_instructions,
             existing_pr=existing_pr,
             continuation_context=state.continuation_summary,
+            model=self._execution_model_name(),
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,
@@ -1842,6 +1861,7 @@ class BradOrchestrator:
                 diff=diff, repo_path=str(self.repo.repo_path),
                 branch_name=state.branch_name,
                 continuation_context=state.continuation_summary,
+                model=self._execution_model_name(),
             )
 
             action = response.get("action")
@@ -1893,6 +1913,7 @@ class BradOrchestrator:
             iteration=state.local_review_fix_count,
             dev_instructions=self._repo_dev_instructions,
             continuation_context=state.continuation_summary,
+            model=self._execution_model_name(),
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,
@@ -2129,6 +2150,7 @@ class BradOrchestrator:
             failed_test_target=failed_test_target,
             dev_instructions=self._repo_dev_instructions,
             continuation_context=state.continuation_summary,
+            model=self._execution_model_name(),
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,
@@ -2201,6 +2223,7 @@ class BradOrchestrator:
             iteration=state.review_fix_count,
             dev_instructions=self._repo_dev_instructions,
             continuation_context=state.continuation_summary,
+            model=self._execution_model_name(),
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,

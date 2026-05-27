@@ -177,10 +177,13 @@ class BradHarness(AgentHarness):
         task_prompt: str,
         repo_path: str,
         system_prompt: str = "",
+        model: Optional[str] = None,
     ) -> LLMResult:
         """Run an agentic task. Returns LLMResult with text, response_id, and usage."""
         self.logger.info(f"=== BradHarness task start in {repo_path} ===")
         self.logger.info(f"Task preview: {task_prompt[:300]}...")
+        # Note: model parameter is accepted for interface compatibility but not used
+        # by BradHarness since the model is configured at the provider level
 
         total_usage = LLMUsage()
 

@@ -584,6 +584,100 @@ def get_execution_cost(execution_id: int) -> float:
         return float(row["total_cost"]) if row else 0.0
 
 
+def estimate_execution_cost(
+    execution: Dict,
+    fallback_model_name: str = "gpt-5.4",
+) -> float:
+    """Estimate an execution's cost from token totals and model pricing."""
+    model_name = (execution.get("model_name") or fallback_model_name or "").strip()
+    costs = get_model_cost(model_name)
+    prompt_tokens = int(execution.get("total_prompt_tokens") or 0)
+    cached_prompt_tokens = int(execution.get("total_cached_prompt_tokens") or 0)
+    completion_tokens = int(execution.get("total_completion_tokens") or 0)
+    non_cached_prompt_tokens = max(0, prompt_tokens - cached_prompt_tokens)
+    return (
+        (non_cached_prompt_tokens / 1000.0) * float(costs.get("prompt", 0.0) or 0.0)
+        + (cached_prompt_tokens / 1000.0) * float(costs.get("cached_prompt", 0.0) or 0.0)
+        + (completion_tokens / 1000.0) * float(costs.get("completion", 0.0) or 0.0)
+    )
+
+
+def get_zero_cost_executions(
+    limit: Optional[int] = None,
+    issue_key: Optional[str] = None,
+) -> List[Dict]:
+    """Return finished executions that still have zero recorded cost."""
+    issue_key = (issue_key or "").strip()
+    sql = [
+        "SELECT *",
+        "  FROM executions",
+        " WHERE COALESCE(total_cost, 0.0) = 0.0",
+        "   AND status != 'running'",
+        "   AND (",
+        "       COALESCE(total_prompt_tokens, 0) > 0",
+        "    OR COALESCE(total_cached_prompt_tokens, 0) > 0",
+        "    OR COALESCE(total_completion_tokens, 0) > 0",
+        "   )",
+    ]
+    params = []
+    if issue_key:
+        sql.insert(3, "   AND issue_key = ?")
+        params.append(issue_key)
+    sql.append(" ORDER BY COALESCE(finished_at, started_at) ASC, id ASC")
+    if limit is not None:
+        sql.append(" LIMIT ?")
+        params.append(max(1, int(limit)))
+    with _get_conn() as conn:
+        rows = conn.execute("\n".join(sql), params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def backfill_zero_cost_executions(
+    limit: Optional[int] = None,
+    issue_key: Optional[str] = None,
+    fallback_model_name: str = "gpt-5.4",
+) -> List[Dict]:
+    """Recompute missing execution costs for finished zero-cost rows.
+
+    Returns a list of backfilled rows with the computed cost for reporting.
+    """
+    updates: List[Dict] = []
+    executions = get_zero_cost_executions(limit=limit, issue_key=issue_key)
+    if not executions:
+        return updates
+
+    with _get_conn() as conn:
+        for execution in executions:
+            exec_id = int(execution.get("id") or 0)
+            if not exec_id:
+                continue
+            cost = estimate_execution_cost(execution, fallback_model_name=fallback_model_name)
+            if cost <= 0.0:
+                continue
+            conn.execute(
+                """
+                UPDATE executions
+                   SET total_cost = ?
+                 WHERE id = ?
+                   AND COALESCE(total_cost, 0.0) = 0.0
+                   AND status != 'running'
+                """,
+                (float(cost), exec_id),
+            )
+            updates.append(
+                {
+                    "id": exec_id,
+                    "issue_key": execution.get("issue_key") or "",
+                    "model_name": (execution.get("model_name") or fallback_model_name or "").strip(),
+                    "total_prompt_tokens": int(execution.get("total_prompt_tokens") or 0),
+                    "total_cached_prompt_tokens": int(execution.get("total_cached_prompt_tokens") or 0),
+                    "total_completion_tokens": int(execution.get("total_completion_tokens") or 0),
+                    "cost": float(cost),
+                }
+            )
+    return updates
+
+
 def get_latest_execution_for_issue(issue_key: str) -> Optional[Dict]:
     """Get the most recent execution for a JIRA issue."""
     with _get_conn() as conn:

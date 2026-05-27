@@ -284,6 +284,30 @@ def test_execution_list_helpers_prefer_issue_title_and_short_action_labels():
     assert format_execution_status_label("failed") == "FAILED"
 
 
+def test_decorate_ticket_uses_pr_state_for_badge():
+    ticket = decorate_ticket(
+        {
+            "issue_key": "TEST-OUTCOME",
+            "issue_title": "PR State Ticket",
+            "latest_execution_status": "completed",
+            "latest_pr_number": 123,
+            "latest_pr_url": "https://github.com/org/repo/pull/123",
+            "is_running": 0,
+            "issue_control_state": "running",
+        },
+        pr_details_fetcher=lambda pr_number: {
+            "state": "closed",
+            "merged_at": "2026-05-27T10:00:00+00:00",
+            "title": "PR State Ticket",
+            "html_url": f"https://github.com/org/repo/pull/{pr_number}",
+        },
+    )
+
+    assert ticket["latest_pr_state"] == "merged"
+    assert ticket["latest_pr_state_label"] == "MERGED"
+    assert ticket["latest_pr_badge_class"] == "badge-merged"
+
+
 def test_api_executions_includes_display_fields(temp_db):
     execution_id = db.create_execution(
         "TEST-456",
@@ -318,7 +342,33 @@ def test_dashboard_lists_tickets(temp_db):
     html = resp.get_data(as_text=True)
     assert "Tickets" in html
     assert "Total Tickets" in html
+    assert "Execution" in html
     assert "/ticket/TEST-DASH" in html
+
+
+def test_dashboard_renders_merged_pr_state_when_available(temp_db, monkeypatch):
+    execution_id = db.create_execution("TEST-MERGED", "Merged ticket", cost_budget=150.0, issue_title="Merged Ticket")
+    db.finish_execution(execution_id, status="completed", pr_number=777, pr_url="https://github.com/org/repo/pull/777")
+
+    monkeypatch.setattr(
+        "brad.gui.app._make_pr_details_fetcher",
+        lambda: (lambda pr_number: {
+            "state": "open",
+            "merged_at": "2026-05-27T09:00:00+00:00",
+            "title": "Merged Ticket",
+            "html_url": f"https://github.com/org/repo/pull/{pr_number}",
+        }),
+    )
+
+    app = create_app(temp_db)
+    client = app.test_client()
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Execution" in html
+    assert "MERGED" in html
+    assert "PR #777" in html
 
 
 def test_ticket_overview_groups_executions_and_prioritizes_running_tickets(temp_db):

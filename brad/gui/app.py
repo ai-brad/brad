@@ -113,6 +113,71 @@ def _make_issue_title_fetcher() -> Optional[Callable[[str], str]]:
     return fetch
 
 
+def _make_pr_details_fetcher() -> Optional[Callable[[int], dict]]:
+    github_repo = os.environ.get("GITHUB_REPO", "")
+    if not github_repo:
+        return None
+
+    github_auth = build_github_token_provider_from_env()
+    if not github_auth.is_configured():
+        return None
+
+    from pathlib import Path
+    from brad.adapters.code_repository.github_adapter import GitHubAdapter
+
+    class _Cfg:
+        pass
+
+    cfg = _Cfg()
+    cfg.github_token = os.environ.get("GITHUB_TOKEN", "")
+    cfg.github_repo = github_repo
+    cfg.github_app_id = os.environ.get("GITHUB_APP_ID") or None
+    cfg.github_app_installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
+    cfg.github_app_private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
+    cfg.github_app_private_key_path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None
+    cfg.attachments_dir = str(Path("/tmp"))
+    adapter = GitHubAdapter(cfg)
+    cache: dict[int, dict] = {}
+
+    def fetch(pr_number: int) -> dict:
+        pr_number = int(pr_number or 0)
+        if pr_number <= 0:
+            return {}
+        if pr_number in cache:
+            return cache[pr_number]
+        try:
+            details = adapter.get_pr_details(pr_number) or {}
+        except Exception as exc:
+            logger.debug("Could not backfill PR details for #%s: %s", pr_number, exc)
+            details = {}
+        cache[pr_number] = details
+        return details
+
+    return fetch
+
+
+def format_pr_state_label(state: Optional[str]) -> str:
+    state = (state or "").strip().lower()
+    if state == "merged":
+        return "MERGED"
+    if state == "open":
+        return "OPEN"
+    if state == "closed":
+        return "CLOSED"
+    return ""
+
+
+def format_pr_state_class(state: Optional[str]) -> str:
+    state = (state or "").strip().lower()
+    if state == "merged":
+        return "badge-merged"
+    if state == "open":
+        return "badge-running"
+    if state == "closed":
+        return "badge-error"
+    return ""
+
+
 def decorate_execution(execution, issue_title_fetcher: Optional[Callable[[str], str]] = None):
     """Add display-only fields used by the list views."""
     ex = dict(execution or {})
@@ -132,7 +197,11 @@ def decorate_execution(execution, issue_title_fetcher: Optional[Callable[[str], 
     return ex
 
 
-def decorate_ticket(ticket, issue_title_fetcher: Optional[Callable[[str], str]] = None):
+def decorate_ticket(
+    ticket,
+    issue_title_fetcher: Optional[Callable[[str], str]] = None,
+    pr_details_fetcher: Optional[Callable[[int], dict]] = None,
+):
     """Add display-only fields used by the ticket overview."""
     tk = dict(ticket or {})
     tk["issue_key"] = (tk.get("issue_key") or "").strip()
@@ -144,6 +213,8 @@ def decorate_ticket(ticket, issue_title_fetcher: Optional[Callable[[str], str]] 
     tk["issue_control_reason"] = (tk.get("issue_control_reason") or "").strip()
     tk["issue_control_updated_at"] = (tk.get("issue_control_updated_at") or "").strip()
     tk["issue_control_updated_by"] = (tk.get("issue_control_updated_by") or "").strip()
+    tk["latest_pr_state"] = (tk.get("latest_pr_state") or "").strip().lower()
+    tk["latest_pr_merged_at"] = (tk.get("latest_pr_merged_at") or "").strip()
     issue_title = (tk.get("issue_title") or "").strip()
     if not issue_title:
         if issue_title_fetcher:
@@ -152,6 +223,25 @@ def decorate_ticket(ticket, issue_title_fetcher: Optional[Callable[[str], str]] 
             issue_title = tk.get("issue_key") or ""
     tk["issue_title"] = issue_title
     tk["latest_execution_status"] = (tk.get("latest_execution_status") or "running").strip().lower() or "running"
+    latest_pr_number = int(tk.get("latest_pr_number") or 0)
+    if latest_pr_number and pr_details_fetcher:
+        try:
+            pr_details = pr_details_fetcher(latest_pr_number) or {}
+        except Exception as exc:
+            logger.debug("Could not decorate PR #%s for ticket %s: %s", latest_pr_number, tk["issue_key"], exc)
+            pr_details = {}
+        latest_pr_state = (pr_details.get("state") or "").strip().lower()
+        latest_pr_merged_at = (pr_details.get("merged_at") or "").strip()
+        if latest_pr_merged_at:
+            latest_pr_state = "merged"
+        if latest_pr_state:
+            tk["latest_pr_state"] = latest_pr_state
+        if latest_pr_merged_at:
+            tk["latest_pr_merged_at"] = latest_pr_merged_at
+        tk["latest_pr_title"] = (pr_details.get("title") or tk.get("latest_pr_title") or "").strip()
+        tk["latest_pr_url"] = (pr_details.get("html_url") or tk.get("latest_pr_url") or "").strip()
+    tk["latest_pr_state_label"] = format_pr_state_label(tk["latest_pr_state"])
+    tk["latest_pr_state_class"] = format_pr_state_class(tk["latest_pr_state"])
     is_running = bool(int(tk.get("is_running") or 0))
     if tk["issue_control_state"] == "stopped":
         display_status = "stopped"
@@ -171,6 +261,8 @@ def decorate_ticket(ticket, issue_title_fetcher: Optional[Callable[[str], str]] 
     tk["total_cost"] = float(tk.get("total_cost") or 0.0)
     tk["execution_count"] = int(tk.get("execution_count") or 0)
     tk["is_running"] = is_running
+    tk["latest_pr_badge_label"] = tk["latest_pr_state_label"]
+    tk["latest_pr_badge_class"] = tk["latest_pr_state_class"]
     return tk
 
 
@@ -307,6 +399,7 @@ def create_app(db_path: str = None) -> Flask:
 
     db.init_db(db_path)
     issue_title_fetcher = _make_issue_title_fetcher()
+    pr_details_fetcher = _make_pr_details_fetcher()
 
     jira_url = os.environ.get("JIRA_URL", "https://jira.example.com")
     github_repo = os.environ.get("GITHUB_REPO", "")
@@ -338,7 +431,7 @@ def create_app(db_path: str = None) -> Flask:
 
     @app.route("/")
     def dashboard():
-        tickets = [decorate_ticket(t, issue_title_fetcher) for t in db.get_ticket_overview(limit=10)]
+        tickets = [decorate_ticket(t, issue_title_fetcher, pr_details_fetcher) for t in db.get_ticket_overview(limit=10)]
         running = tickets[0] if tickets and tickets[0].get("is_running") else None
         totals = db.get_total_ticket_stats()
         return render_template(
@@ -384,6 +477,7 @@ def create_app(db_path: str = None) -> Flask:
                 "issue_control_updated_by": issue_control.get("updated_by") or "",
             },
             issue_title_fetcher,
+            pr_details_fetcher,
         )
         ticket_cost_breakdown = build_ticket_cost_breakdown(issue_key)
         return render_template(
@@ -430,6 +524,7 @@ def create_app(db_path: str = None) -> Flask:
                 "issue_control_updated_by": issue_control.get("updated_by") or "",
             },
             issue_title_fetcher,
+            pr_details_fetcher,
         )
         ticket_cost_breakdown = build_ticket_cost_breakdown(issue_key)
         return jsonify({
@@ -484,7 +579,7 @@ def create_app(db_path: str = None) -> Flask:
 
     @app.route("/api/tickets")
     def api_tickets():
-        tickets = [decorate_ticket(t, issue_title_fetcher) for t in db.get_ticket_overview(limit=200)]
+        tickets = [decorate_ticket(t, issue_title_fetcher, pr_details_fetcher) for t in db.get_ticket_overview(limit=200)]
         running = tickets[0] if tickets and tickets[0].get("is_running") else None
         totals = db.get_total_ticket_stats()
         return jsonify({
@@ -498,7 +593,7 @@ def create_app(db_path: str = None) -> Flask:
         running = db.get_running_execution()
         running = decorate_execution(running, issue_title_fetcher) if running else None
         recent = [decorate_execution(ex, issue_title_fetcher) for ex in db.get_all_executions(limit=10)]
-        tickets = [decorate_ticket(t, issue_title_fetcher) for t in db.get_ticket_overview(limit=10)]
+        tickets = [decorate_ticket(t, issue_title_fetcher, pr_details_fetcher) for t in db.get_ticket_overview(limit=10)]
         totals = db.get_total_costs()
         return jsonify({
             "running": running,
