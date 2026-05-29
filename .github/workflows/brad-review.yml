@@ -1,0 +1,64 @@
+name: Brad AI Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+      base_branch:
+        description: 'Base branch to compare against'
+        required: false
+        default: 'main'
+        type: string
+      prompt_append:
+        description: 'Optional text to append to the review prompt (e.g., "Fix all issues and commit changes")'
+        required: false
+        type: string
+      prompt_override:
+        description: 'Optional full prompt override (replaces default prompt entirely)'
+        required: false
+        type: string
+
+concurrency:
+  group: brad-pr-review-${{ github.repository }}-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  brad-review:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - 
+        name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: refs/pull/${{ inputs.pr_number }}/head
+      - 
+        name: Azure CLI login
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - 
+        name: Install codex
+        run: |
+          npm install -g @openai/codex
+          codex --version
+      - 
+        name: Run Brad AI Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          BRAD_BATCH_MAX_RETRIES: ${{ vars.BRAD_BATCH_MAX_RETRIES }}
+          BRAD_PROMPT_APPEND: ${{ inputs.prompt_append }}
+          BRAD_PROMPT_OVERRIDE: ${{ inputs.prompt_override }}
+          BRAD_PROMPT_BASE: ${{ vars.BRAD_PROMPT_BASE }}
+          BRAD_REVIEW_JIRA_API_TOKEN: ${{ secrets.BRAD_REVIEW_JIRA_API_TOKEN }}
+        run: |
+          chmod +x ./scripts/brad_pr_review.sh
+          ./scripts/brad_pr_review.sh ${{ inputs.pr_number }} ${{ inputs.base_branch }}
