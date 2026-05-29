@@ -245,14 +245,17 @@ sequenceDiagram
 **Step-by-step:**
 
 1. **PM creates JIRA issue** with description + attachments, adds label `BradReview`
-2. **Brad analyzes requirements** — may request clarification or propose test scenarios
+2. **Brad grooms requirements** — reads the codebase, evaluates completeness, and either proceeds or posts focused clarifying questions to Jira
+   - If questions are posted: PM answers in the description and re-adds `BradReview`
+   - To skip grooming entirely: add `BradSkipGrooming` alongside `BradReview`
 3. **Brad implements** — creates feature branch, writes code + tests, opens PR
 4. **Brad monitors CI/CD** — fixes failures (up to 5 attempts), addresses review comments
 5. **Brad completes** — sets JIRA status to REVIEW, posts "Brad is done."
 
 ## 🛡️ Safety Features
 
-- **Max clarification cycles:** 3 per issue
+- **Max clarification cycles:** 3 per issue (configurable via `MAX_CLARIFICATION_CYCLES`)
+- **Grooming bypass:** Add `BradSkipGrooming` label to jump straight to implementation
 - **Max CI fix iterations:** 5 per issue
 - **Max review fix iterations:** 3 per issue
 - **Agent iteration limit:** 200 per LLM invocation

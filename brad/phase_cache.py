@@ -10,6 +10,7 @@ a composite of:
 Cache is stored as JSON files under .brad_cache/<issue_key>/.
 """
 
+import dataclasses
 import json
 import hashlib
 from pathlib import Path
@@ -67,6 +68,11 @@ def set_cached_phase(
         except OSError:
             pass
 
+    def _default(obj):
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            return dataclasses.asdict(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     cache_file = issue_dir / f"{phase}_{key}.json"
-    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    cache_file.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=_default), encoding="utf-8")
     logger.info(f"Cache SET for {issue_key}/{phase} (key={key})")

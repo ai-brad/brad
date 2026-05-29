@@ -61,6 +61,10 @@ class Config:
     log_level: str = "INFO"
     attachments_dir: str = "attachments"
     ticketing_adapter: str = "jira"
+    code_repo_adapter: str = "github"
+    ci_adapter: str = "github_actions"
+    dummy_code_repo_log_path: Optional[str] = None
+    dummy_ci_log_path: Optional[str] = None
 
     # Agent harness selection — which agentic loop drives the model.
     # See ``brad/adapters/harness`` for available harnesses.
@@ -79,6 +83,10 @@ class Config:
     codex_bin: str = "codex"
     codex_model: Optional[str] = None
     codex_summarization_model: Optional[str] = None
+    # Model to use when the issue is labelled BradLight (cheaper/faster).
+    codex_model_light: Optional[str] = None
+    # Model to use when the issue is labelled BradHeavy (stronger/more capable).
+    codex_model_heavy: Optional[str] = None
     codex_sandbox: str = "workspace-write"
     dummy_ticket_path: Optional[str] = None
     dummy_ticket_log_path: Optional[str] = None
@@ -102,6 +110,8 @@ def load_config() -> Config:
     deployments = [d.strip() for d in deployments_raw.split(",") if d.strip()] if deployments_raw else []
 
     ticketing_adapter = os.environ.get("BRAD_TICKETING", "jira").strip().lower()
+    code_repo_adapter = os.environ.get("BRAD_CODE_REPO", "github").strip().lower()
+    ci_adapter = os.environ.get("BRAD_CI", "github_actions").strip().lower()
 
     github_repo = os.environ["GITHUB_REPO"]
     github_token = os.environ.get("GITHUB_TOKEN", "")
@@ -191,6 +201,10 @@ def load_config() -> Config:
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         attachments_dir=os.environ.get("ATTACHMENTS_DIR", str(Path.cwd() / "attachments")),
         ticketing_adapter=ticketing_adapter,
+        code_repo_adapter=code_repo_adapter,
+        ci_adapter=ci_adapter,
+        dummy_code_repo_log_path=os.environ.get("BRAD_DUMMY_CODE_REPO_LOG_PATH") or None,
+        dummy_ci_log_path=os.environ.get("BRAD_DUMMY_CI_LOG_PATH") or None,
 
         harness=os.environ.get("BRAD_HARNESS", "brad"),
         llm_provider=os.environ.get("BRAD_LLM_PROVIDER", "azure_openai"),
@@ -198,6 +212,8 @@ def load_config() -> Config:
         codex_bin=os.environ.get("CODEX_BIN", "codex"),
         codex_model=os.environ.get("CODEX_MODEL") or None,
         codex_summarization_model=os.environ.get("CODEX_SUMMARIZATION_MODEL") or None,
+        codex_model_light=os.environ.get("CODEX_MODEL_LIGHT") or None,
+        codex_model_heavy=os.environ.get("CODEX_MODEL_HEAVY") or None,
         codex_sandbox=os.environ.get("CODEX_SANDBOX", "workspace-write"),
         dummy_ticket_path=os.environ.get("BRAD_DUMMY_TICKET_PATH") or None,
         dummy_ticket_log_path=os.environ.get("BRAD_DUMMY_TICKET_LOG_PATH") or None,

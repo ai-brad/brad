@@ -13,8 +13,8 @@ from brad.logging_config import get_logger
 from brad.config import Config
 from brad.conflict_context import extract_jira_key
 from brad.adapters.ticketing import build_ticketing_adapter
-from brad.adapters.code_repository.github_adapter import GitHubAdapter
-from brad.adapters.ci_cd.github_actions_adapter import GitHubActionsAdapter
+from brad.adapters.code_repository import build_code_repo_adapter
+from brad.adapters.ci_cd import build_ci_adapter
 from brad.adapters.observability.azure_adapter import AzureObservabilityAdapter
 from brad.adapters.harness import build_harness
 from brad.agents.interface import AIAgentInterface
@@ -43,6 +43,8 @@ class IssueState:
     local_review_fix_count: int = 0
     cost_budget: float = 150.0
     last_failure_detail: str = ""
+    # Resolved model name for this execution (from BradLight/BradHeavy label).
+    model: Optional[str] = None
 
 
 RESULT_SUMMARY_LIMIT = 4000
@@ -64,8 +66,8 @@ class BradOrchestrator:
 
         # Initialize adapters
         self.ticketing = build_ticketing_adapter(cfg)
-        self.code_repo = GitHubAdapter(cfg)
-        self.ci = GitHubActionsAdapter(cfg)
+        self.code_repo = build_code_repo_adapter(cfg)
+        self.ci = build_ci_adapter(cfg)
         self.observability = AzureObservabilityAdapter(cfg)
         harness = build_harness(cfg)
         self.agent = AIAgentInterface(harness, cfg)
@@ -469,8 +471,14 @@ class BradOrchestrator:
             except Exception as e:
                 self.logger.error(f"Failed to process review comments: {e}")
 
-            # Then fetch issues with BradReview label
-            issues = self.ticketing.fetch_issues_with_label("BradReview")
+            # Then fetch issues with BradLight or BradHeavy label
+            seen_keys: set = set()
+            issues = []
+            for label in ("BradLight", "BradHeavy"):
+                for issue in self.ticketing.fetch_issues_with_label(label):
+                    if issue["key"] not in seen_keys:
+                        seen_keys.add(issue["key"])
+                        issues.append(issue)
 
             if not issues:
                 self.logger.info("No issues to process")
@@ -1477,6 +1485,20 @@ class BradOrchestrator:
         self.logger.info(f"Processing issue: {issue_key}")
         self.logger.info(f"Summary: {summary}")
 
+        # Resolve model from BradLight / BradHeavy label before creating the execution record.
+        raw_labels = [lbl.get("name", lbl) if isinstance(lbl, dict) else lbl
+                      for lbl in fields.get("labels", [])]
+        if "BradLight" in raw_labels:
+            resolved_model = self.cfg.codex_model_light or self._execution_model_name()
+            trigger_label = "BradLight"
+        elif "BradHeavy" in raw_labels:
+            resolved_model = self.cfg.codex_model_heavy or self._execution_model_name()
+            trigger_label = "BradHeavy"
+        else:
+            resolved_model = self._execution_model_name()
+            trigger_label = None
+        self.logger.info(f"{issue_key}: using model={resolved_model} (trigger={trigger_label or 'default'})")
+
         # Create execution record
         issue_title = summary
         execution_id = db.create_execution(
@@ -1485,14 +1507,15 @@ class BradOrchestrator:
             cost_budget=float(self.cfg.__dict__.get("cost_budget") or 150.0),
             issue_title=issue_title,
             action="Implement",
-            model_name=self._execution_model_name(),
+            model_name=resolved_model,
         )
 
         try:
             db.update_execution_phase(execution_id, "initializing", "Preparing to process issue")
 
-            # Step 1: Remove BradReview label immediately
-            self.ticketing.remove_label(issue_key, "BradReview")
+            # Step 1: Remove trigger label immediately
+            if trigger_label:
+                self.ticketing.remove_label(issue_key, trigger_label)
 
             # Step 2: Set status to IN PROGRESS
             try:
@@ -1515,6 +1538,10 @@ class BradOrchestrator:
 
             branch_name = issue_key
 
+            prior_grooming_cycles = sum(
+                1 for ex in db.get_executions_by_issue(issue_key)
+                if ex.get("status") == "grooming" and ex.get("id") != execution_id
+            )
             state = IssueState(
                 issue_key=issue_key,
                 description=description,
@@ -1524,11 +1551,14 @@ class BradOrchestrator:
                 execution_id=execution_id,
                 jira_updated=fields.get("updated", ""),
                 cost_budget=float(self.cfg.__dict__.get("cost_budget")),
+                model=resolved_model,
+                clarification_count=prior_grooming_cycles,
             )
             state.continuation_summary = self._build_issue_continuation_summary(issue_key, execution_id=execution_id)
 
             # Step 4: Check for BradScrapExisting label — scrap existing work if present
-            has_scrap_label = "BradScrapExisting" in issue.get("fields", {}).get("labels", [])
+            labels = raw_labels
+            has_scrap_label = "BradScrapExisting" in labels
             if has_scrap_label:
                 self._set_phase(state, "scrapping_existing", "Scrapping existing PR and branch")
                 scrap_success = self._scrap_existing_pr(issue_key, branch_name)
@@ -1558,8 +1588,24 @@ class BradOrchestrator:
                 self.ticketing.comment(
                     issue_key,
                     f"Brad is continuing work on existing PR #{existing_pr}. "
-                    f"To restart from scratch, add the BradScrapExisting label before BradReview."
+                    f"To restart from scratch, add the BradScrapExisting label before BradLight/BradHeavy."
                 )
+
+            # Step 6: Requirements grooming — only for fresh tickets (no existing PR).
+            # Skip if: an existing PR was found (already past grooming), or BradSkipGrooming label present.
+            skip_grooming = existing_pr or "BradSkipGrooming" in labels
+            if "BradSkipGrooming" in labels:
+                self.logger.info(f"{issue_key}: BradSkipGrooming label present — skipping requirements phase")
+                try:
+                    self.ticketing.remove_label(issue_key, "BradSkipGrooming")
+                except Exception as e:
+                    self.logger.warning(f"{issue_key}: Failed to remove BradSkipGrooming label: {e}")
+
+            if not skip_grooming:
+                grooming_done = self._handle_requirements_phase(state)
+                if not grooming_done:
+                    # Grooming posted questions to Jira and stopped — execution finished inside the method.
+                    return
 
             self._handle_implementation_phase(state, existing_pr)
             if self._stop_requested(issue_key):
@@ -1588,11 +1634,17 @@ class BradOrchestrator:
             db.finish_execution(execution_id, status="error", error_message=_clip_summary(e))
             raise
 
-    def _handle_requirements_phase(self, state: IssueState):
-        """Handle requirements analysis phase."""
+    def _handle_requirements_phase(self, state: IssueState) -> bool:
+        """Handle requirements grooming phase.
+
+        Returns True if requirements are satisfied and implementation should proceed.
+        Returns False if Brad posted questions to Jira and the execution is now parked
+        (caller should return immediately; this method has already finished the execution record).
+        """
         self._set_phase(state, "reading_requirements", "Analyzing issue requirements")
         if self._stop_requested(state.issue_key):
-            return
+            db.finish_execution(state.execution_id, status="stopped", error_message="Brad stopped this ticket")
+            return False
         self.repo.reset_to_clean_state("main")
 
         main_commit = self.repo.get_head_commit("main")
@@ -1610,7 +1662,7 @@ class BradOrchestrator:
                 repo_path=str(self.repo.repo_path),
                 iteration=state.clarification_count,
                 continuation_context=state.continuation_summary,
-                model=self._execution_model_name(),
+                model=state.model,
             )
             self._record_step(state.execution_id, "requirements", response)
             state.continuation_summary = self._refresh_issue_continuation_summary(
@@ -1632,15 +1684,46 @@ class BradOrchestrator:
             self.ticketing.comment(state.issue_key, message)
             state.clarification_count += 1
             if state.clarification_count >= self.cfg.max_clarification_cycles:
-                self.ticketing.comment(state.issue_key, "Brad is stuck - too many clarification cycles.")
+                self.ticketing.comment(
+                    state.issue_key,
+                    "Brad has asked too many clarification rounds without a resolution. "
+                    "Please rewrite the ticket description with complete requirements and re-add BradLight or BradHeavy. "
+                    "Add BradSkipGrooming alongside BradLight/BradHeavy to bypass the grooming step entirely."
+                )
+                db.update_execution_phase(state.execution_id, "stuck", "Too many clarification cycles")
+                db.finish_execution(state.execution_id, status="stuck",
+                                    error_message="Too many clarification cycles")
+            else:
+                db.update_execution_phase(
+                    state.execution_id, "awaiting_clarification",
+                    f"Waiting for PM to answer clarification questions (round {state.clarification_count})"
+                )
+                db.finish_execution(state.execution_id, status="grooming")
+            return False
+
         elif action == "propose_scenarios":
+            # Scenarios posted for PM review — park until re-triggered
             self.ticketing.comment(state.issue_key, message)
+            db.update_execution_phase(
+                state.execution_id, "awaiting_clarification",
+                "Waiting for PM to review proposed acceptance criteria"
+            )
+            db.finish_execution(state.execution_id, status="grooming")
+            return False
+
         elif action == "ready":
-            self.ticketing.comment(state.issue_key, "Requirements are clear. Brad is starting implementation.")
-            existing_pr = self.code_repo.pr_exists_for_branch(state.branch_name)
-            self._handle_implementation_phase(state, existing_pr)
+            self.logger.info(f"{state.issue_key}: Requirements grooming complete — proceeding to implementation")
+            return True
+
         else:
-            self.ticketing.comment(state.issue_key, f"Brad encountered an error during requirements analysis:\n\n{message}\n\nBrad is stuck.")
+            self.ticketing.comment(
+                state.issue_key,
+                f"Brad encountered an error during requirements analysis:\n\n{message}\n\nBrad is stuck."
+            )
+            db.update_execution_phase(state.execution_id, "stuck", "Error in requirements analysis")
+            db.finish_execution(state.execution_id, status="error",
+                                error_message=f"Requirements analysis error: {message[:200]}")
+            return False
 
     def _handle_implementation_phase(self, state: IssueState, existing_pr: Optional[int] = None):
         """Handle implementation phase — impl → local review loop → then create PR → CI."""
@@ -1667,7 +1750,7 @@ class BradOrchestrator:
             dev_instructions=self._repo_dev_instructions,
             existing_pr=existing_pr,
             continuation_context=state.continuation_summary,
-            model=self._execution_model_name(),
+            model=state.model,
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,
@@ -1861,7 +1944,7 @@ class BradOrchestrator:
                 diff=diff, repo_path=str(self.repo.repo_path),
                 branch_name=state.branch_name,
                 continuation_context=state.continuation_summary,
-                model=self._execution_model_name(),
+                model=state.model,
             )
 
             action = response.get("action")
@@ -1913,7 +1996,7 @@ class BradOrchestrator:
             iteration=state.local_review_fix_count,
             dev_instructions=self._repo_dev_instructions,
             continuation_context=state.continuation_summary,
-            model=self._execution_model_name(),
+            model=state.model,
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,
@@ -2150,7 +2233,7 @@ class BradOrchestrator:
             failed_test_target=failed_test_target,
             dev_instructions=self._repo_dev_instructions,
             continuation_context=state.continuation_summary,
-            model=self._execution_model_name(),
+            model=state.model,
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,
@@ -2223,7 +2306,7 @@ class BradOrchestrator:
             iteration=state.review_fix_count,
             dev_instructions=self._repo_dev_instructions,
             continuation_context=state.continuation_summary,
-            model=self._execution_model_name(),
+            model=state.model,
         )
         state.continuation_summary = self._refresh_issue_continuation_summary(
             state.issue_key,

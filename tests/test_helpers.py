@@ -45,6 +45,10 @@ def make_test_config(tmp_path, **overrides):
         ticketing_adapter="jira",
         dummy_ticket_path=None,
         dummy_ticket_log_path=None,
+        code_repo_adapter="github",
+        ci_adapter="github_actions",
+        dummy_code_repo_log_path=None,
+        dummy_ci_log_path=None,
     )
     defaults.update(overrides)
     return Config(**defaults)

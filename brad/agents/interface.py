@@ -356,6 +356,7 @@ class AIAgentInterface:
             issue_key=issue_key,
             description=description,
             attachments_text=attachments_text,
+            iteration=iteration,
         )
 
     def _build_implementation_prompt(self, issue_key, description, attachment_paths, branch_name, iteration, pre_search="", dev_instructions="", existing_pr=None):
@@ -546,17 +547,31 @@ class AIAgentInterface:
     # ------------------------------------------------------------------
     def _parse_requirements_response(self, output: str) -> Dict:
         output_lower = output.lower().strip()
+        # Check the first two lines for keywords to tolerate minor preamble
+        first_lines = "\n".join(output.splitlines()[:2]).lower()
+
         if output.startswith("ERROR:"):
             return {"action": "error", "message": output, "details": output}
-        if any(kw in output_lower for kw in ['ready to implement', 'requirements are clear', 'can proceed']):
-            self.logger.info("Detected: ready to implement")
+
+        # "READY TO IMPLEMENT" — check first lines first (most likely position), then full text
+        if any(kw in first_lines for kw in ['ready to implement', 'requirements are clear', 'can proceed']):
+            self.logger.info("Detected: ready to implement (first lines)")
             return {"action": "ready", "message": output, "details": ""}
-        if output_lower.startswith('clarifying questions'):
+
+        # "CLARIFYING QUESTIONS:" — anywhere in first two lines or as a section header
+        if 'clarifying questions' in first_lines or 'clarifying questions' in output_lower[:200]:
             self.logger.info("Detected: clarification needed")
             return {"action": "clarify", "message": output, "details": ""}
+
+        # "READY TO IMPLEMENT" anywhere in full output (model may add brief intro before it)
+        if any(kw in output_lower for kw in ['ready to implement', 'requirements are clear', 'can proceed']):
+            self.logger.info("Detected: ready to implement (full text)")
+            return {"action": "ready", "message": output, "details": ""}
+
         if any(kw in output_lower for kw in ['acceptance criteria', 'given', 'when', 'then']):
             self.logger.info("Detected: acceptance criteria")
             return {"action": "propose_scenarios", "message": output, "details": ""}
+
         self.logger.info("Defaulting to: ready to implement")
         return {"action": "ready", "message": output, "details": ""}
 

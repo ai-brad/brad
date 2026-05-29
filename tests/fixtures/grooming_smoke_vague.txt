@@ -1,0 +1,8 @@
+key: SMOKE-1
+summary: Add notifications
+labels: BradLight
+status: Open
+project: SMOKE
+updated: 2026-05-26T00:00:00+00:00
+
+Add notifications to the app.

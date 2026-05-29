@@ -1,0 +1,14 @@
+key: SMOKE-2
+summary: Add dark-mode toggle to settings page
+labels: BradLight
+status: Open
+project: SMOKE
+updated: 2026-05-26T00:00:00+00:00
+
+When a user navigates to Settings → Appearance, a "Dark Mode" toggle is shown.
+Toggling it switches the entire UI between light and dark themes immediately without a page reload.
+The preference is persisted per user account and restored automatically on next login.
+Only the logged-in user's own session is affected; other users' sessions are unaffected.
+The toggle should be accessible (aria labels, keyboard navigable).
+Out of scope: admin-level theme enforcement, per-page overrides.
+Acceptance criteria are considered met when the toggle renders, persists across logout/login, and does not affect other users.

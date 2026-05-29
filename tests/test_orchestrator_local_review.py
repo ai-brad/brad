@@ -80,7 +80,9 @@ def test_implementation_phase_routes_failed_local_review_into_fix_loop(
             "pr_number": 123,
             "pr_url": "https://github.com/owner/repo/pull/123",
             "_response_id": "resp-1",
-            "_usage": SimpleNamespace(prompt_tokens=100, completion_tokens=50, cached_tokens=0),
+            "_usage": SimpleNamespace(
+                prompt_tokens=100, completion_tokens=50, cached_tokens=0
+            ),
         }
     )
     orchestrator.agent.invoke_implementation = invoke_implementation
@@ -101,8 +103,14 @@ def test_implementation_phase_routes_failed_local_review_into_fix_loop(
     monkeypatch.setattr(db, "update_execution_pr", lambda *args, **kwargs: None)
     monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
     monkeypatch.setattr(db, "get_execution_cost", lambda *args, **kwargs: 0.0)
-    monkeypatch.setattr(db, "get_model_cost", lambda *args, **kwargs: {"prompt": 0.0, "completion": 0.0})
-    monkeypatch.setattr(db, "get_execution", lambda *args, **kwargs: {"started_at": "2025-01-01", "total_cost": 0.0})
+    monkeypatch.setattr(
+        db, "get_model_cost", lambda *args, **kwargs: {"prompt": 0.0, "completion": 0.0}
+    )
+    monkeypatch.setattr(
+        db,
+        "get_execution",
+        lambda *args, **kwargs: {"started_at": "2025-01-01", "total_cost": 0.0},
+    )
 
     orchestrator._handle_implementation_phase(state)
 
@@ -111,7 +119,9 @@ def test_implementation_phase_routes_failed_local_review_into_fix_loop(
     handle_ci_monitoring.assert_called_once_with(state)
 
 
-def test_local_review_fix_reruns_review_and_then_returns_true(temp_git_repo, monkeypatch):
+def test_local_review_fix_reruns_review_and_then_returns_true(
+    temp_git_repo, monkeypatch
+):
     orchestrator, _ = make_orchestrator(temp_git_repo)
     state = make_state()
 
@@ -122,7 +132,9 @@ def test_local_review_fix_reruns_review_and_then_returns_true(temp_git_repo, mon
             "action": "fixed",
             "message": "Added the missing guard clause",
             "_response_id": "resp-2",
-            "_usage": SimpleNamespace(prompt_tokens=100, completion_tokens=50, cached_tokens=0),
+            "_usage": SimpleNamespace(
+                prompt_tokens=100, completion_tokens=50, cached_tokens=0
+            ),
         }
     )
     orchestrator.agent.invoke_local_review_fix = invoke_local_review_fix
@@ -139,7 +151,9 @@ def test_local_review_fix_reruns_review_and_then_returns_true(temp_git_repo, mon
     monkeypatch.setattr(db, "update_execution_costs", lambda *args, **kwargs: None)
     monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
     monkeypatch.setattr(db, "get_execution_cost", lambda *args, **kwargs: 0.0)
-    monkeypatch.setattr(db, "get_model_cost", lambda *args, **kwargs: {"prompt": 0.0, "completion": 0.0})
+    monkeypatch.setattr(
+        db, "get_model_cost", lambda *args, **kwargs: {"prompt": 0.0, "completion": 0.0}
+    )
 
     result = orchestrator._handle_local_review_fix(state, "Please add a guard clause")
 
@@ -167,14 +181,20 @@ def test_local_review_fix_stops_at_iteration_limit(temp_git_repo, monkeypatch):
     ticket_comment.assert_called_once()
 
 
-def test_scrap_existing_pr_deletes_old_branch_only_after_pr_close(temp_git_repo, monkeypatch):
+def test_scrap_existing_pr_deletes_old_branch_only_after_pr_close(
+    temp_git_repo, monkeypatch
+):
     orchestrator, _ = make_orchestrator(temp_git_repo)
     orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=123)
     orchestrator.repo.reset_to_clean_state = Mock()
 
     commands = []
-    orchestrator.code_repo.close_pr = Mock(side_effect=lambda *args, **kwargs: commands.append(("close_pr",)))
-    orchestrator.repo._run_git = Mock(side_effect=lambda *args, **kwargs: commands.append(args) or SimpleNamespace())
+    orchestrator.code_repo.close_pr = Mock(
+        side_effect=lambda *args, **kwargs: commands.append(("close_pr",))
+    )
+    orchestrator.repo._run_git = Mock(
+        side_effect=lambda *args, **kwargs: commands.append(args) or SimpleNamespace()
+    )
     monkeypatch.setattr("brad.orchestrator.time.time", lambda: 1700000000)
 
     result = orchestrator._scrap_existing_pr("DEV-123", "DEV-123")
@@ -192,7 +212,9 @@ def test_scrap_existing_pr_deletes_old_branch_only_after_pr_close(temp_git_repo,
     ]
 
 
-def test_scrap_existing_pr_keeps_old_branch_when_close_fails(temp_git_repo, monkeypatch):
+def test_scrap_existing_pr_keeps_old_branch_when_close_fails(
+    temp_git_repo, monkeypatch
+):
     orchestrator, _ = make_orchestrator(temp_git_repo)
     orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=123)
     orchestrator.code_repo.close_pr = Mock(side_effect=RuntimeError("close failed"))
@@ -203,7 +225,10 @@ def test_scrap_existing_pr_keeps_old_branch_when_close_fails(temp_git_repo, monk
     result = orchestrator._scrap_existing_pr("DEV-123", "DEV-123")
 
     assert result is False
-    assert not any(call.args[:3] == ("push", "origin", "--delete") for call in orchestrator.repo._run_git.mock_calls)
+    assert not any(
+        call.args[:3] == ("push", "origin", "--delete")
+        for call in orchestrator.repo._run_git.mock_calls
+    )
 
 
 def test_process_issue_aborts_when_scrap_fails(temp_git_repo, monkeypatch):
@@ -223,6 +248,7 @@ def test_process_issue_aborts_when_scrap_fails(temp_git_repo, monkeypatch):
 
     monkeypatch.setattr(db, "create_execution", lambda *args, **kwargs: 1)
     monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "get_executions_by_issue", lambda *args, **kwargs: [])
     finish_execution = Mock()
     monkeypatch.setattr(db, "finish_execution", finish_execution)
 
@@ -236,7 +262,9 @@ def test_process_issue_aborts_when_scrap_fails(temp_git_repo, monkeypatch):
     )
 
 
-def test_process_issue_continues_when_scrap_label_removal_fails(temp_git_repo, monkeypatch):
+def test_process_issue_continues_when_scrap_label_removal_fails(
+    temp_git_repo, monkeypatch
+):
     orchestrator, _ = make_orchestrator(temp_git_repo)
     issue = {
         "key": "DEV-123",
@@ -249,16 +277,19 @@ def test_process_issue_continues_when_scrap_label_removal_fails(temp_git_repo, m
         },
     }
     orchestrator._scrap_existing_pr = Mock(return_value=True)
+
     def remove_label(issue_key, label):
         if label == "BradScrapExisting":
             raise RuntimeError("jira unavailable")
 
     orchestrator.ticketing.remove_label = Mock(side_effect=remove_label)
     orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=None)
+    orchestrator._handle_requirements_phase = Mock(return_value=True)
     orchestrator._handle_implementation_phase = Mock()
 
     monkeypatch.setattr(db, "create_execution", lambda *args, **kwargs: 1)
     monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "get_executions_by_issue", lambda *args, **kwargs: [])
     monkeypatch.setattr(db, "finish_execution", lambda *args, **kwargs: None)
 
     orchestrator._process_issue(issue)
@@ -283,11 +314,15 @@ def test_process_issue_persists_specific_pr_failure_detail(temp_git_repo, monkey
         state.last_failure_detail = "Failed to create PR via gh: authentication failed"
         state.pr_number = None
 
-    orchestrator._handle_implementation_phase = Mock(side_effect=fake_handle_implementation)
+    orchestrator._handle_requirements_phase = Mock(return_value=True)
+    orchestrator._handle_implementation_phase = Mock(
+        side_effect=fake_handle_implementation
+    )
     orchestrator.code_repo.pr_exists_for_branch = Mock(return_value=None)
 
     monkeypatch.setattr(db, "create_execution", lambda *args, **kwargs: 1)
     monkeypatch.setattr(db, "update_execution_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(db, "get_executions_by_issue", lambda *args, **kwargs: [])
     finish_execution = Mock()
     monkeypatch.setattr(db, "finish_execution", finish_execution)
 
